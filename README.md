@@ -10,7 +10,7 @@ Built with Python and tkinter. No API key required — works by polling the publ
 
 ## Features
 
-- **Full-store stock change monitoring** — Every poll cycle fetches the entire UniFi catalog (~300+ products) and diffs against the previous snapshot, showing every stock transition across the store in a live feed
+- **Full-store stock change monitoring** — Every poll cycle fetches the entire UniFi catalog (~460+ products) and diffs against the previous snapshot, showing every stock transition across the store in a live feed
 - **Watch list with favourites** — Pick specific out-of-stock items to monitor, star the ones you care about most
 - **Windows notifications + sound alerts** — System tray balloon notifications with optional sound when a watched item comes back in stock
 - **Auto browser launch** — Automatically opens the store page when something you're watching becomes available
@@ -124,7 +124,7 @@ These are created at runtime and excluded via `.gitignore`:
 The tool uses Ubiquiti's public Next.js store API:
 
 1. Fetches the `buildId` from the store homepage (cached for 5 minutes)
-2. Pulls product data from 7 category endpoints via `/_next/data/{buildId}/...`
+2. Pulls product data from 9 category endpoints via `/_next/data/{buildId}/...`
 3. Parses variant `status` fields (`Available`, `SoldOut`, `ComingSoon`)
 4. Diffs the full catalog against the previous snapshot to detect transitions
 5. Checks watched items against the catalog and fires notifications on availability
@@ -168,7 +168,7 @@ All config files are JSON and stored alongside the script:
 - The store's `buildId` rotates periodically. The tool auto-detects this and refreshes with exponential backoff retry.
 - Poll interval should be kept at 60s+ to be respectful to Ubiquiti's servers. The default is 60s.
 - Notifications use PowerShell's `System.Windows.Forms.NotifyIcon` — works on all Windows 10/11 systems without extra dependencies.
-- The full catalog fetch (~7 HTTP requests per cycle) is actually more efficient than individual product checks when watching many items.
+- The full catalog fetch (~9 HTTP requests per cycle) is actually more efficient than individual product checks when watching many items.
 
 ## License
 
