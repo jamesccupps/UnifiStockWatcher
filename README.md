@@ -29,7 +29,7 @@ Built with Python and tkinter. No API key required — works by polling the publ
 
 ## Screenshots
 
-*GUI with dark theme showing watched items, stock changes feed, and activity log.*
+<img width="2032" height="1163" alt="image" src="https://github.com/user-attachments/assets/1f2d694a-ea53-4c13-887e-32ea800a1be9" />
 
 ## Installation
 
