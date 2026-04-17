@@ -44,16 +44,20 @@ CATEGORIES = [
     "category/all-door-access",
     "category/all-integrations",
     "category/all-advanced-hosting",
+    "category/accessories-cables-dacs",
+    "category/network-storage",
 ]
 
 CATEGORY_LABELS = {
-    "category/all-cloud-gateways":   "Cloud Gateways",
-    "category/all-switching":        "Switching",
-    "category/all-wifi":             "WiFi",
-    "category/all-cameras-nvrs":     "Cameras & NVRs",
-    "category/all-door-access":      "Door Access",
-    "category/all-integrations":     "Integrations",
-    "category/all-advanced-hosting": "Advanced Hosting",
+    "category/all-cloud-gateways":      "Cloud Gateways",
+    "category/all-switching":           "Switching",
+    "category/all-wifi":                "WiFi",
+    "category/all-cameras-nvrs":        "Cameras & NVRs",
+    "category/all-door-access":         "Door Access",
+    "category/all-integrations":        "Integrations",
+    "category/all-advanced-hosting":    "Advanced Hosting",
+    "category/accessories-cables-dacs": "Accessories, Cables & DACs",
+    "category/network-storage":         "Network Storage",
 }
 
 HEADERS = {
@@ -199,23 +203,67 @@ def invalidate_build_id():
 
 # ── Store API ────────────────────────────────────────────────────────────────
 
-def fetch_all_products(build_id, region="us", progress_cb=None):
-    """Fetch all products from every category, deduplicated. Returns list of dicts."""
+def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
+    """Fetch all products from every category, deduplicated. Returns list of dicts.
+
+    progress_cb(int_0_to_100) is called after each category.
+    error_cb(category_slug, exception) is called on per-category failures so callers
+    (e.g. the GUI) can surface them instead of only printing to stdout.
+
+    If a category 404s — usually because the Next.js buildId rotated mid-fetch —
+    the cache is invalidated and that category is retried once with a fresh id.
+    """
     products = {}
     region_path = STORE_REGIONS[region]["path"]
     for i, cat in enumerate(CATEGORIES):
-        url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/{cat}.json"
-        try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            r.raise_for_status()
-            data = r.json()
-            for subcat in data.get("pageProps", {}).get("subCategories", []):
-                for p in subcat.get("products", []):
+        for attempt in range(2):  # one retry slot for build_id rotation
+            url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/{cat}.json"
+            try:
+                r = requests.get(url, headers=HEADERS, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                pp = data.get("pageProps", {})
+                # Primary path: products nested under subCategories
+                for subcat in pp.get("subCategories", []):
+                    for p in subcat.get("products", []):
+                        if p.get("slug"):
+                            p["_category"] = cat
+                            products[p["slug"]] = p
+                # Belt-and-suspenders: a flat products list, in case UI ever
+                # switches a category page to that shape. setdefault so the
+                # richer subCategory entry wins if both exist.
+                for p in pp.get("products", []):
                     if p.get("slug"):
-                        p["_category"] = cat
-                        products[p["slug"]] = p
-        except Exception as e:
-            print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
+                        p.setdefault("_category", cat)
+                        products.setdefault(p["slug"], p)
+                break  # success
+            except requests.exceptions.HTTPError as e:
+                # 404 typically means buildId rotated between homepage fetch
+                # and this category call. Invalidate + retry once.
+                if (e.response is not None
+                        and e.response.status_code == 404
+                        and attempt == 0):
+                    try:
+                        invalidate_build_id()
+                        build_id = get_build_id(region, force=True)
+                        continue  # retry the same category with fresh id
+                    except Exception:
+                        pass
+                print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
+                if error_cb:
+                    try:
+                        error_cb(cat, e)
+                    except Exception:
+                        pass
+                break
+            except Exception as e:
+                print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
+                if error_cb:
+                    try:
+                        error_cb(cat, e)
+                    except Exception:
+                        pass
+                break
         if progress_cb:
             progress_cb(int((i + 1) / len(CATEGORIES) * 100))
         time.sleep(0.3)
