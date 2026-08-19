@@ -1,5 +1,5 @@
 """
-Unifi Stock Watcher — CLI  (v2.0)
+Unifi Stock Watcher — CLI
 Headless console watcher using the shared core module.
 
 Commands:
@@ -21,7 +21,7 @@ if not ensure_requests():
     sys.exit(1)
 
 from unifi_core import (
-    STORE_BASE, STORE_REGIONS,
+    __version__, STORE_BASE, STORE_REGIONS,
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
     is_available, get_price, check_slug,
@@ -41,7 +41,7 @@ def run_setup():
     region   = settings.get("region", "us")
 
     print("=" * 60)
-    print("  Unifi Stock Watcher v2.0 — Product Picker")
+    print(f"  UniFi Stock Watcher v{__version__} — Product Picker")
     print(f"  Region: {STORE_REGIONS[region]['label']}")
     print("=" * 60)
     print()
@@ -125,7 +125,7 @@ def test_mode():
     region   = settings.get("region", "us")
 
     print("=" * 60)
-    print("  Unifi Stock Watcher v2.0 — TEST MODE")
+    print(f"  UniFi Stock Watcher v{__version__} — TEST MODE")
     print("=" * 60)
     print()
 
@@ -194,7 +194,7 @@ def main():
         time.sleep(3)
 
     print("=" * 60)
-    print("  Unifi Stock Watcher v2.0 — Running")
+    print(f"  UniFi Stock Watcher v{__version__} — Running")
     print(f"  Region: {STORE_REGIONS[region]['label']}  ·  Interval: {interval}s")
     for w in watched:
         price_str = f" ({w.get('price', '')})" if w.get("price") else ""

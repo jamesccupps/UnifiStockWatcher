@@ -1,5 +1,5 @@
 """
-Unifi Stock Watcher — GUI  (v2.0)
+Unifi Stock Watcher — GUI
 Tabs: Watcher | History | Settings
 Features: price tracking, stock history, category filters, sound alerts,
           configurable poll interval, multi-region, export/import, statistics,
@@ -32,7 +32,7 @@ _HAVE_REQUESTS = ensure_requests()
 
 # ── Core imports ──────────────────────────────────────────────────────────────
 from unifi_core import (
-    STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS, DEFAULT_SETTINGS,
+    __version__, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS, DEFAULT_SETTINGS,
     ProductNotFound, StoreError,
     load_settings, save_settings, build_palette,
     get_build_id, invalidate_build_id, fetch_all_products,
@@ -1063,7 +1063,7 @@ class UnifiWatcherApp(tk.Tk):
                  bg=C["panel"], fg=C["text"],
                  font=(settings["font_family"], settings["font_size"] + 4, "bold")
                  ).pack(side="left")
-        tk.Label(logo, text="v2.0", bg=C["panel"], fg=C["muted"],
+        tk.Label(logo, text=f"v{__version__}", bg=C["panel"], fg=C["muted"],
                  font=(settings["font_family"], settings["font_size"] - 2)
                  ).pack(side="left", padx=(8, 0))
 
