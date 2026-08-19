@@ -54,14 +54,17 @@ STORE_BASE = "https://store.ui.com"
 MAX_REDIRECTS = 4
 CATEGORY_WORKERS = 4
 
+# Category slugs the store actually serves today. These get renamed - cameras
+# moved from all-cameras-nvrs to all-physical-security, and all-advanced-hosting
+# became an alias for the accessories page - so _fetch_category follows
+# redirects and logs a warning when one of these drifts.
 CATEGORIES = [
     "category/all-cloud-gateways",
     "category/all-switching",
     "category/all-wifi",
-    "category/all-cameras-nvrs",
+    "category/all-physical-security",
     "category/all-door-access",
     "category/all-integrations",
-    "category/all-advanced-hosting",
     "category/accessories-cables-dacs",
     "category/network-storage",
 ]
@@ -70,10 +73,9 @@ CATEGORY_LABELS = {
     "category/all-cloud-gateways":      "Cloud Gateways",
     "category/all-switching":           "Switching",
     "category/all-wifi":                "WiFi",
-    "category/all-cameras-nvrs":        "Cameras & NVRs",
+    "category/all-physical-security":   "Cameras & Physical Security",
     "category/all-door-access":         "Door Access",
     "category/all-integrations":        "Integrations",
-    "category/all-advanced-hosting":    "Advanced Hosting",
     "category/accessories-cables-dacs": "Accessories, Cables & DACs",
     "category/network-storage":         "Network Storage",
 }
@@ -326,25 +328,47 @@ def invalidate_build_id(region=None):
 def _fetch_category(build_id, region, cat):
     """Fetch one category page. Returns {slug: product}.
 
+    Follows the store's own redirects. Categories get renamed - cameras moved
+    from all-cameras-nvrs to all-physical-security - and the old path then
+    answers HTTP 200 with a redirect directive and no products. Without this
+    the whole category silently disappeared from the catalog: no error, no
+    empty-result signal, just 135 products that stopped being watched.
+
     A 404 usually means the buildId rotated between the homepage fetch and
     this call, so refresh it once and retry with the new id.
     """
-    region_path = STORE_REGIONS[region]["path"]
+    path = f"/{STORE_REGIONS[region]['path']}/{cat}"
     found = {}
-    for attempt in range(2):
-        url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/{cat}.json"
+    refreshed = False
+
+    for _ in range(MAX_REDIRECTS):
         try:
-            r = get_session().get(url, timeout=15)
+            r = get_session().get(_data_url(build_id, path), timeout=15)
+            if r.status_code in (301, 302, 303, 307, 308):
+                loc = r.headers.get("Location") or r.headers.get("x-nextjs-redirect")
+                if not loc:
+                    raise StoreError(
+                        f"{cat}: {r.status_code} with no redirect target")
+                path = urlsplit(loc).path.removesuffix(".json")
+                continue
             r.raise_for_status()
             page_props = r.json().get("pageProps", {})
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
-            if status == 404 and attempt == 0:
+            if status == 404 and not refreshed:
+                refreshed = True
                 fresh = get_build_id(region, force=True)
                 if fresh != build_id:
                     build_id = fresh
                     continue
             raise
+
+        target = page_props.get("__N_REDIRECT")
+        if target:
+            path = urlsplit(target).path.removesuffix(".json")
+            log.warning("Category %s now redirects to %s - update CATEGORIES",
+                        cat, path)
+            continue
 
         for subcat in page_props.get("subCategories", []):
             for p in subcat.get("products", []):
@@ -359,7 +383,8 @@ def _fetch_category(build_id, region, cat):
                 p.setdefault("_category", cat)
                 found.setdefault(p["slug"], p)
         return found
-    return found
+
+    raise StoreError(f"{cat}: too many redirects (>{MAX_REDIRECTS})")
 
 
 def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
