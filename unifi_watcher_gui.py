@@ -56,6 +56,30 @@ def hsep(parent, C, pady=(0, 0)):
     f.pack(fill="x", pady=pady)
 
 
+def bind_wheel(canvas, scrollable):
+    """Scroll `canvas` while the pointer is over it.
+
+    Deliberately not bind_all: that is application-wide, so the browse dialog's
+    binding replaced the main list's and then outlived its own canvas, leaving
+    every later wheel event raising "invalid command name" and the main list
+    unscrollable. Enter/Leave scopes the binding to the widget that owns it.
+    """
+    def on_wheel(e):
+        canvas.yview_scroll(-1 * (e.delta // 120), "units")
+        return "break"
+
+    def enable(_=None):
+        canvas.bind_all("<MouseWheel>", on_wheel)
+
+    def disable(_=None):
+        canvas.unbind_all("<MouseWheel>")
+
+    for w in (canvas, scrollable):
+        w.bind("<Enter>", enable, add="+")
+        w.bind("<Leave>", disable, add="+")
+    canvas.bind("<Destroy>", disable, add="+")
+
+
 def tooltip(widget, text):
     """Simple tooltip on hover."""
     tip = None
@@ -184,8 +208,7 @@ class BrowseDialog(tk.Toplevel):
             lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
         self.cv.bind("<Configure>",
             lambda e: self.cv.itemconfig(self._cw, width=e.width))
-        self.cv.bind_all("<MouseWheel>",
-            lambda e: self.cv.yview_scroll(-1*(e.delta//120), "units"))
+        bind_wheel(self.cv, self.cb_frame)
 
         hsep(self, C)
 
@@ -1018,8 +1041,7 @@ class UnifiWatcherApp(tk.Tk):
             lambda e: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")))
         self.list_canvas.bind("<Configure>",
             lambda e: self.list_canvas.itemconfig(self._lcw, width=e.width))
-        self.list_canvas.bind_all("<MouseWheel>",
-            lambda e: self.list_canvas.yview_scroll(-1*(e.delta//120), "units"))
+        bind_wheel(self.list_canvas, self.list_frame)
 
         tk.Frame(p, bg=C["border"], height=1).pack(fill="x")
 
