@@ -4,14 +4,14 @@ A desktop stock monitoring tool for the [Ubiquiti Store](https://store.ui.com). 
 
 Built with Python and tkinter. No API key required — works by polling the public store API.
 
-![Python](https://img.shields.io/badge/python-3.8+-blue)
+![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
 ![License](https://img.shields.io/badge/license-MIT-green)
 [![CI](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/ci.yml)
 
 ## Features
 
-- **Full-store stock change monitoring** — Every poll cycle fetches the entire UniFi catalog (~420 products) and diffs against the previous snapshot, showing every stock transition across the store in a live feed
+- **Full-store stock change monitoring** — Every poll cycle fetches the entire UniFi catalog (~490 products) and diffs against the previous snapshot, showing every stock transition across the store in a live feed
 - **Watch list with favourites** — Pick specific out-of-stock items to monitor, star the ones you care about most
 - **Windows notifications + sound alerts** — System tray balloon notifications with optional sound when a watched item comes back in stock
 - **Auto browser launch** — Automatically opens the store page when something you're watching becomes available
@@ -36,10 +36,8 @@ Built with Python and tkinter. No API key required — works by polling the publ
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8+ ([python.org](https://python.org) — check "Add to PATH" during install)
-- Windows 10/11 (notifications use Windows Forms)
+Windows 10/11. Notifications use Windows Forms, so other platforms will run
+but stay silent.
 
 ### Quick Start — no Python needed
 
@@ -51,14 +49,17 @@ The executables are unsigned, so SmartScreen warns on first run (*More info → 
 
 ### From source
 
+Needs Python 3.10+ ([python.org](https://python.org) — check "Add to PATH"
+during install). CI covers 3.10 through 3.13.
+
 1. Download or clone this repo
 2. Double-click `install_and_run.bat`
 3. Choose option 1 to launch the GUI
 
-### Manual Setup
+Or by hand:
 
 ```bash
-pip install requests
+pip install -r requirements.txt
 python unifi_watcher_gui.py
 ```
 
@@ -114,10 +115,14 @@ UnifiStockWatcher/
 ├── _bootstrap.py          # Dependency check, runs before unifi_core is imported
 ├── unifi_watcher.py       # CLI watcher (headless console mode)
 ├── unifi_watcher_gui.py   # GUI application (tkinter)
-├── tests/                 # pytest suite (offline)
+├── tests/                 # pytest suite (offline, no network)
+├── tests_live/            # contract tests against the real store (nightly CI)
+├── UnifiStockWatcher.spec # PyInstaller build for the Windows executables
 ├── install_and_run.bat    # Windows launcher with dependency install
 ├── launch_gui.bat         # Quick GUI launcher
 ├── requirements.txt       # Python dependencies
+├── .github/workflows/     # CI, nightly store contract check, release build
+├── CHANGELOG.md
 ├── .gitignore
 ├── LICENSE
 └── README.md
@@ -132,6 +137,7 @@ These are created at runtime and excluded via `.gitignore`:
 | `watched_items.json` | Your watch list |
 | `settings.json` | GUI settings and preferences |
 | `stock_history.json` | Stock check event log |
+| `category_cache.json` | Discovered store categories, refreshed daily |
 
 ## How It Works
 
@@ -197,7 +203,7 @@ All config files are JSON and stored alongside the script:
 - Poll interval should be kept at 60s+ to be respectful to Ubiquiti's servers. The default is 60s.
 - Notifications use PowerShell's `System.Windows.Forms.NotifyIcon` — works on all Windows 10/11 systems without extra dependencies. Titles and messages are passed through the environment, never interpolated into the script, so store- or import-supplied text cannot be executed.
 - Imported watch lists are untrusted input: entries are validated, length-bounded, and reduced to known keys before being stored.
-- The full catalog fetch (9 HTTP requests per cycle) is more efficient than individual product checks, and does not grow with the size of your watch list.
+- The full catalog fetch (8 HTTP requests per cycle) is more efficient than individual product checks, and does not grow with the size of your watch list.
 
 ## Building the executables
 
