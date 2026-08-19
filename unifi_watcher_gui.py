@@ -128,6 +128,8 @@ class BrowseDialog(tk.Toplevel):
         self.all_prods        = []
         self.filtered         = []
         self.check_vars       = {}
+        self._row_pool        = []      # reused row widgets, see _rebuild
+        self._filter_job      = None    # pending debounced filter
 
         self.title("Add Items to Watch List")
         self.configure(bg=C["bg"])
@@ -200,7 +202,7 @@ class BrowseDialog(tk.Toplevel):
         tk.Label(bar, text="Search:", bg=C["bg"], fg=C["muted"],
                  font=self.F(-1)).pack(side="left")
         self.q = tk.StringVar()
-        self.q.trace_add("write", lambda *_: self._filter())
+        self.q.trace_add("write", lambda *_: self._filter_soon())
         e = tk.Entry(bar, textvariable=self.q, bg=C["panel"], fg=C["text"],
                      insertbackground=C["text"], relief="flat",
                      font=self.F(), bd=0)
@@ -291,7 +293,14 @@ class BrowseDialog(tk.Toplevel):
                 text=f"Error displaying products: {ex}", fg=self.C["red"])
             self.prog.pack_forget()
 
+    def _filter_soon(self, delay_ms=180):
+        """Coalesce rapid typing into a single filter pass."""
+        if self._filter_job is not None:
+            self.after_cancel(self._filter_job)
+        self._filter_job = self.after(delay_ms, self._filter)
+
     def _filter(self):
+        self._filter_job = None
         q = self.q.get().lower()
         show_all = self._stock_var.get()
         cat_sel  = self._cat_var.get()
@@ -316,48 +325,80 @@ class BrowseDialog(tk.Toplevel):
         self.status_lbl.config(
             text=f"{len(self.filtered)} item(s)", fg=self.C["muted"])
 
-    def _rebuild(self):
+    def _make_row(self):
+        """Create one reusable row. Rows are configured, never rebuilt."""
         C = self.C
-        for w in self.cb_frame.winfo_children():
-            w.destroy()
-        for p in self.filtered:
+        row = tk.Frame(self.cb_frame, bg=C["bg"])
+        cb = tk.Checkbutton(
+            row, command=self._count,
+            bg=C["bg"], selectcolor=C["panel"],
+            activebackground=C["hover"], activeforeground=C["text"],
+            font=self.F(), bd=0, highlightthickness=0, anchor="w")
+        cb.pack(side="left", fill="x", expand=True)
+        price_lbl = tk.Label(row, bg=C["bg"], fg=C["muted"], font=self.F(-1))
+        stock_lbl = tk.Label(row, text="IN STOCK", bg="#1a3a2a", fg=C["green"],
+                             font=self.F(-2, True), padx=5, pady=1)
+
+        def enter(_, r=row):
+            if r._hover_enabled:
+                r.config(bg=C["hover"])
+
+        def leave(_, r=row):
+            r.config(bg=C["bg"])
+
+        row._hover_enabled = True
+        row.bind("<Enter>", enter)
+        row.bind("<Leave>", leave)
+        cb.bind("<Enter>", enter)
+        cb.bind("<Leave>", leave)
+        return {"frame": row, "cb": cb, "price": price_lbl, "stock": stock_lbl}
+
+    def _rebuild(self):
+        """Render self.filtered by reconfiguring pooled rows.
+
+        Previously every filter keystroke destroyed all rows and built new
+        ones - 421 Frames, Checkbuttons and Labels - which cost ~1.25s for the
+        full catalog and made the search box lag by ~220ms per character.
+        Widget creation is the expensive part; reconfiguring is not.
+        """
+        C = self.C
+        while len(self._row_pool) < len(self.filtered):
+            self._row_pool.append(self._make_row())
+
+        for row, p in zip(self._row_pool, self.filtered):
             slug  = p["slug"]
             title = p.get("title", slug)
             price = get_price(p) or ""
             avail = is_available(p)
+            already = slug in self.already_watching
             if slug not in self.check_vars:
                 self.check_vars[slug] = tk.BooleanVar(value=False)
-            already = slug in self.already_watching
 
-            row = tk.Frame(self.cb_frame, bg=C["bg"])
-            row.pack(fill="x", padx=8, pady=1)
-
-            label_text = f"  {title}" + (" (watching)" if already else "")
-            cb = tk.Checkbutton(
-                row, text=label_text, variable=self.check_vars[slug],
-                command=self._count,
-                bg=C["bg"],
+            row["frame"]._hover_enabled = not already
+            row["frame"].config(bg=C["bg"])
+            row["cb"].config(
+                text=f"  {title}" + (" (watching)" if already else ""),
+                variable=self.check_vars[slug],
                 fg=C["muted"] if already else (C["green"] if avail else C["text"]),
-                selectcolor=C["panel"],
-                activebackground=C["hover"], activeforeground=C["text"],
-                font=self.F(), bd=0, highlightthickness=0, anchor="w",
                 cursor="arrow" if already else "hand2",
                 state="disabled" if already else "normal")
-            cb.pack(side="left", fill="x", expand=True)
 
+            # side="right" packs outward-in, so re-pack stock before price to
+            # keep the badge left of the price the way it renders initially.
+            row["price"].pack_forget()
+            row["stock"].pack_forget()
             if price:
-                tk.Label(row, text=price, bg=C["bg"], fg=C["muted"],
-                         font=self.F(-1)).pack(side="right", padx=(0, 8))
+                row["price"].config(text=price)
+                row["price"].pack(side="right", padx=(0, 8))
             if avail:
-                tk.Label(row, text="IN STOCK", bg="#1a3a2a", fg=C["green"],
-                         font=self.F(-2, True), padx=5, pady=1).pack(
-                             side="right", padx=(0, 4))
+                row["stock"].pack(side="right", padx=(0, 4))
 
-            if not already:
-                row.bind("<Enter>", lambda e, r=row: r.config(bg=C["hover"]))
-                row.bind("<Leave>", lambda e, r=row: r.config(bg=C["bg"]))
-                cb.bind("<Enter>",  lambda e, r=row: r.config(bg=C["hover"]))
-                cb.bind("<Leave>",  lambda e, r=row: r.config(bg=C["bg"]))
+            if not row["frame"].winfo_ismapped():
+                row["frame"].pack(fill="x", padx=8, pady=1)
+
+        for row in self._row_pool[len(self.filtered):]:
+            if row["frame"].winfo_ismapped():
+                row["frame"].pack_forget()
 
     def _toggle_all(self):
         v = self.all_var.get()
