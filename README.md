@@ -41,7 +41,15 @@ Built with Python and tkinter. No API key required — works by polling the publ
 - Python 3.8+ ([python.org](https://python.org) — check "Add to PATH" during install)
 - Windows 10/11 (notifications use Windows Forms)
 
-### Quick Start
+### Quick Start — no Python needed
+
+Grab `UnifiStockWatcher.exe` from the [latest release](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest) and double-click it.
+
+It is portable: `watched_items.json`, `settings.json` and `stock_history.json` are kept in the folder you put the executable in, so choose somewhere writable rather than `Program Files`. `UnifiStockWatcher-cli.exe` is the headless watcher, for running under Task Scheduler.
+
+The executables are unsigned, so SmartScreen warns on first run (*More info → Run anyway*), and some antivirus engines flag unsigned PyInstaller builds. Running from source avoids both.
+
+### From source
 
 1. Download or clone this repo
 2. Double-click `install_and_run.bat`
@@ -60,6 +68,7 @@ python unifi_watcher_gui.py
 python unifi_watcher.py           # Start watching (setup on first run)
 python unifi_watcher.py --setup   # Re-pick watched items
 python unifi_watcher.py --test    # Verify notifications work
+python unifi_watcher.py --version # Print the version and config directory
 ```
 
 ## Usage
@@ -189,6 +198,15 @@ All config files are JSON and stored alongside the script:
 - Notifications use PowerShell's `System.Windows.Forms.NotifyIcon` — works on all Windows 10/11 systems without extra dependencies. Titles and messages are passed through the environment, never interpolated into the script, so store- or import-supplied text cannot be executed.
 - Imported watch lists are untrusted input: entries are validated, length-bounded, and reduced to known keys before being stored.
 - The full catalog fetch (9 HTTP requests per cycle) is more efficient than individual product checks, and does not grow with the size of your watch list.
+
+## Building the executables
+
+```bash
+pip install pyinstaller
+python -m PyInstaller UnifiStockWatcher.spec --noconfirm --clean
+```
+
+Produces `dist/UnifiStockWatcher.exe` (windowed) and `dist/UnifiStockWatcher-cli.exe` (console). CI builds and attaches both to any `v*` tag.
 
 ## Development
 

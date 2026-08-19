@@ -6,6 +6,7 @@ Commands:
   python unifi_watcher.py           -- run watcher (setup on first run)
   python unifi_watcher.py --setup   -- re-run product picker
   python unifi_watcher.py --test    -- verify notifications + stock detection
+  python unifi_watcher.py --version -- print the version and config directory
 """
 
 import sys
@@ -21,7 +22,7 @@ if not ensure_requests():
     sys.exit(1)
 
 from unifi_core import (
-    __version__, STORE_BASE, STORE_REGIONS,
+    __version__, BASE_DIR, STORE_BASE, STORE_REGIONS,
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
     refresh_category_coverage,
@@ -274,6 +275,14 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         datefmt="%H:%M:%S")
     try:
+        if "--version" in sys.argv or "-V" in sys.argv:
+            # Also prints where runtime files live: that answers the common
+            # "where are my settings?" question, and it is what the release
+            # smoke test checks, since a frozen build that resolves its paths
+            # into PyInstaller's temp directory loses the watch list silently.
+            print(f"UniFi Stock Watcher {__version__}")
+            print(f"config directory: {BASE_DIR}")
+            sys.exit(0)
         if "--test" in sys.argv:
             test_mode()
         elif "--setup" in sys.argv:

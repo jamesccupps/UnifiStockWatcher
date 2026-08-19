@@ -16,6 +16,10 @@
   adopting all of them would double the per-cycle request count for nothing.
 - A nightly CI job (`tests_live/`) checks the real store contract and opens an
   issue when it breaks.
+- Standalone Windows executables, built and attached to each `v*` tag. No
+  Python install required. They are portable - runtime files sit next to the
+  executable.
+- `--version` on the CLI, which also prints the config directory.
 
 ### Fixed
 

@@ -4,6 +4,7 @@ Shared store API, configuration, notifications, price & stock history.
 """
 
 import os
+import sys
 import re
 import json
 import time
@@ -36,7 +37,21 @@ class ProductNotFound(StoreError):
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
-BASE_DIR       = Path(__file__).parent
+def _base_dir():
+    """Where runtime files live.
+
+    Frozen by PyInstaller, __file__ points inside the temporary extraction
+    directory, which is deleted on exit - a watch list written there would be
+    silently lost every run. Use the directory holding the executable instead,
+    which keeps the app portable: drop the .exe in a folder and its config
+    lives beside it.
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).parent
+    return Path(__file__).parent
+
+
+BASE_DIR       = _base_dir()
 CONFIG_FILE    = BASE_DIR / "watched_items.json"
 SETTINGS_FILE  = BASE_DIR / "settings.json"
 HISTORY_FILE   = BASE_DIR / "stock_history.json"

@@ -1,0 +1,82 @@
+name: Release
+
+# Builds the Windows executables and attaches them to the GitHub release for
+# a v* tag. "Install Python, tick Add to PATH, run a .bat" is where most
+# people give up; a double-clickable .exe is the whole point.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write            # needed to attach assets to the release
+
+jobs:
+  build:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest pyinstaller
+
+      # Never ship a binary that fails its own tests.
+      - name: Test
+        run: python -m pytest tests --tb=short
+
+      - name: Build
+        run: python -m PyInstaller UnifiStockWatcher.spec --noconfirm --clean
+
+      - name: Smoke-test the executables
+        run: |
+          set -e
+          test -f dist/UnifiStockWatcher.exe
+          test -f dist/UnifiStockWatcher-cli.exe
+
+          mkdir -p smoke && cd smoke
+          cp ../dist/UnifiStockWatcher-cli.exe .
+          out=$(./UnifiStockWatcher-cli.exe --version)
+          echo "$out"
+
+          echo "$out" | grep -q "UniFi Stock Watcher" \
+            || { echo "the executable did not start"; exit 1; }
+
+          # A frozen app must resolve its config next to the exe. Resolving it
+          # into PyInstaller's temp extraction directory (_MEIxxxx) loses the
+          # watch list on every run, silently. Match on directory name rather
+          # than a full path, so this does not turn into a slash-direction quiz.
+          case "$out" in
+            *_MEI*) echo "config resolved into the temp extraction dir"; exit 1 ;;
+          esac
+          echo "$out" | grep -qi "smoke" \
+            || { echo "config did not resolve beside the executable"; exit 1; }
+          echo "smoke test passed"
+
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            dist/UnifiStockWatcher.exe
+            dist/UnifiStockWatcher-cli.exe
+          body_path: ${{ github.workspace }}/.github/release-note.md
+          append_body: true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: UnifiStockWatcher-windows
+          path: dist/*.exe
