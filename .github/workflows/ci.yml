@@ -15,6 +15,14 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     runs-on: ${{ matrix.os }}
 
+    # Windows runners default to PowerShell, which does not expand globs for
+    # native commands - `python -m pyflakes *.py` reaches pyflakes as the
+    # literal string and exits 1. Pin bash so every step behaves identically
+    # across the matrix.
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
 

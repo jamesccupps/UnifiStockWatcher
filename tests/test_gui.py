@@ -51,6 +51,26 @@ def pump(root, seconds=0.3):
     root.mainloop()
 
 
+def pump_until(root, predicate, timeout=10.0):
+    """Run the event loop until predicate() is true, or timeout.
+
+    Preferred over a fixed pump() wherever a background thread has to finish
+    first: a CI runner is far slower than a dev box, and a hardcoded wait
+    turns "slow" into "failed".
+    """
+    deadline = time.monotonic() + timeout
+
+    def poll():
+        if predicate() or time.monotonic() > deadline:
+            root.quit()
+        else:
+            root.after(20, poll)
+
+    root.after(0, poll)
+    root.mainloop()
+    return predicate()
+
+
 # ── watcher state ────────────────────────────────────────────────────────────
 
 def test_applying_settings_while_watching_keeps_the_button_correct(app):
@@ -139,6 +159,8 @@ def test_a_delisted_item_is_checked_once(app, monkeypatch):
     monkeypatch.setattr(gui, "check_slug", raiser)
     app.watching = True
     threading.Thread(target=app._watch_loop, daemon=True).start()
+    assert pump_until(app, lambda: "gone" in app._delisted)
+    # give the loop room to wrongly re-check across further cycles
     pump(app, 2.5)
     app.watching = False
     app._wake.set()
@@ -182,6 +204,8 @@ def browse(app, monkeypatch):
     d.withdraw()
     d.all_prods = sorted(catalog, key=lambda p: p["title"])
     d.picks = picks
+    pump_until(app, lambda: d._filter_job is None)
+    d.all_prods = sorted(catalog, key=lambda p: p["title"])
     yield d
     try:
         d.destroy()
@@ -263,7 +287,7 @@ def test_browse_confirm_excludes_already_watched(browse):
 def test_browse_search_is_debounced(browse, app):
     # Let the dialog's own background fetch land first; its _on_fetched also
     # calls _filter and would otherwise be counted.
-    pump(app, 0.6)
+    pump_until(app, lambda: browse._filter_job is None and browse.filtered)
     browse._stock_var.set(True)
     browse._filter()
 
@@ -273,7 +297,8 @@ def test_browse_search_is_debounced(browse, app):
     for text in ("b", "br", "bra", "brav", "bravo"):
         browse.q.set(text)
     assert calls == []                      # nothing ran while typing
-    pump(app, 0.6)
+    assert pump_until(app, lambda: len(calls) >= 1)
+    pump(app, 0.4)                          # nothing further should arrive
     assert len(calls) == 1                  # one coalesced pass
     assert shown(browse) == ["Bravo"]
 
@@ -286,7 +311,7 @@ def test_browse_reports_fetch_failure(app, monkeypatch):
     monkeypatch.setattr(gui, "get_build_id", boom)
     d = gui.BrowseDialog(app, [], lambda *_: None, app.C, app.settings)
     d.withdraw()
-    pump(app, 1.5)
+    pump_until(app, lambda: "Error" in d.status_lbl.cget("text"))
     assert "store unreachable" in d.status_lbl.cget("text")
     d.destroy()
 
