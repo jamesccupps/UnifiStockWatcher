@@ -3,20 +3,23 @@ Unifi Stock Watcher — Core Module
 Shared store API, configuration, notifications, price & stock history.
 """
 
+import os
 import re
-import sys
 import json
 import time
+import logging
 import threading
-import webbrowser
+import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 
 try:
     import requests
     REQUESTS_OK = True
 except ImportError:
     REQUESTS_OK = False
+
+log = logging.getLogger("unifi_watcher")
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -457,33 +460,45 @@ stock_history = StockHistory()
 # ── Notification ─────────────────────────────────────────────────────────────
 
 def notify_windows(title, message):
-    """System tray balloon notification via System.Windows.Forms."""
-    ps_title   = title.replace('"', '`"').replace("'", "`'")
-    ps_message = message.replace('"', '`"').replace("'", "`'")
-    ps_script = f"""
+    """Show a system tray balloon notification (Windows).
+
+    Title and message are passed to PowerShell through the environment, never
+    interpolated into the script source — a product title containing $(...) or
+    other PowerShell metacharacters is therefore inert data, not code.
+
+    Returns immediately; the helper process lives just long enough for the
+    balloon to render so callers (including the Tk main thread) never block.
+    """
+    ps_script = """
+$ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $balloon = New-Object System.Windows.Forms.NotifyIcon
 $balloon.Icon = [System.Drawing.SystemIcons]::Information
 $balloon.BalloonTipIcon = [System.Windows.Forms.ToolTipIcon]::Info
-$balloon.BalloonTipTitle = "{ps_title}"
-$balloon.BalloonTipText = "{ps_message}"
+$balloon.BalloonTipTitle = $env:UNIFI_NOTIFY_TITLE
+$balloon.BalloonTipText = $env:UNIFI_NOTIFY_TEXT
 $balloon.Visible = $true
 $balloon.ShowBalloonTip(10000)
 Start-Sleep -Seconds 3
 $balloon.Dispose()
 """
+    env = dict(os.environ)
+    # NotifyIcon truncates beyond these; trim here so the balloon stays readable.
+    env["UNIFI_NOTIFY_TITLE"] = str(title)[:63]
+    env["UNIFI_NOTIFY_TEXT"]  = str(message)[:255]
+
     try:
-        import subprocess
-        result = subprocess.run(
-            ["powershell", "-NoProfile", "-WindowStyle", "Hidden", "-Command", ps_script],
-            capture_output=True, text=True, timeout=10
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive",
+             "-WindowStyle", "Hidden", "-Command", ps_script],
+            env=env,
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip())
     except Exception as e:
-        print("\a")
-        print(f"  *** ALERT: {title} — {message}  (popup failed: {e})")
+        log.warning("Balloon notification failed (%s): %s - %s", e, title, message)
+        print("", end="", flush=True)
 
 
 def play_sound():
