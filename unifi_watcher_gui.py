@@ -35,7 +35,7 @@ from unifi_core import (
     STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS, DEFAULT_SETTINGS,
     ProductNotFound, StoreError,
     load_settings, save_settings, build_palette,
-    get_build_id, fetch_all_products,
+    get_build_id, invalidate_build_id, fetch_all_products,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
     notify_windows, play_sound,
@@ -1154,6 +1154,7 @@ class UnifiWatcherApp(tk.Tk):
         st.pack(fill="both", expand=True)
 
     def _on_settings_apply(self, new_settings):
+        old_region = self.settings.get("region", "us")
         self.settings = new_settings
         self.C = build_palette(new_settings)
         self.configure(bg=self.C["bg"])
@@ -1162,7 +1163,27 @@ class UnifiWatcherApp(tk.Tk):
         self._build()
         self.watched = load_watched()
         self._refresh_list()
+
+        # _build() recreates the action bar in its idle state. The watcher
+        # thread is still running, so without this the button reads
+        # "Start Watching" while watching, and clicking it stops the watcher.
+        if self.watching:
+            self.start_btn.config(text="⏹  Stop Watching", bg=self.C["red"])
+            self._set_status("Watching…", self.C["green"])
+
+        if new_settings.get("region", "us") != old_region:
+            self._on_region_changed(old_region, new_settings.get("region", "us"))
+
         self._log("Settings applied.", "ok")
+
+    def _on_region_changed(self, old, new):
+        """Drop state that only made sense for the previous store."""
+        # The catalog baseline is per-region; keeping it would diff US prices
+        # and stock against EU ones and report the whole store as "changed".
+        self._prev_status = {}
+        self.notified.clear()
+        invalidate_build_id()
+        self._log(f"Region {old.upper()} → {new.upper()}: baseline reset.", "warn")
 
     # ── List rendering ────────────────────────────────────────────────
 
