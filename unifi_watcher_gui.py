@@ -896,7 +896,7 @@ class UnifiWatcherApp(tk.Tk):
         self.watcher_thread = None
         self._log_open      = True
         self._changes_open  = True
-        self._force_flag    = False
+        self._wake          = threading.Event()  # interrupts the poll countdown
         self._prev_status   = {}   # slug -> (in_stock, title, price) for full-store diff
         self._delisted      = set()  # slugs the store no longer carries
 
@@ -917,6 +917,7 @@ class UnifiWatcherApp(tk.Tk):
     def _on_close(self):
         """Stop the watcher and persist buffered history before exiting."""
         self.watching = False
+        self._wake.set()
         try:
             stock_history.flush()
         except Exception:
@@ -1328,28 +1329,33 @@ class UnifiWatcherApp(tk.Tk):
     def _toggle_watch(self):
         if self.watching:
             self.watching = False
+            self._wake.set()        # cut the countdown short rather than
+                                    # waiting out the current 1s sleep tick
             self.start_btn.config(text="▶  Start Watching", bg=self.C["accent"])
             self.countdown_lbl.config(text="")
             self._set_status("Idle", self.C["muted"])
             self._log("Watcher stopped.", "warn")
         else:
+            if self.watcher_thread and self.watcher_thread.is_alive():
+                return              # previous loop still winding down
             if not self.watched:
                 messagebox.showinfo("No items", 'Add items first using "+ Add Items".')
                 return
             self.watching = True
+            self._wake.clear()
             self.start_btn.config(text="⏹  Stop Watching", bg=self.C["red"])
             self._set_status("Watching…", self.C["green"])
             self._log(f"Started — watching {len(self.watched)} item(s).", "ok")
-            self.watcher_thread = threading.Thread(target=self._watch_loop, daemon=True)
+            self.watcher_thread = threading.Thread(
+                target=self._watch_loop, daemon=True, name="unifi-watch")
             self.watcher_thread.start()
 
     def _force_check(self):
         if self.watching:
-            self._force_flag = True
+            self._wake.set()
             self._log("Forcing immediate check…", "info")
 
     def _watch_loop(self):
-        self._force_flag = False
         while self.watching:
             self.after(0, self._set_status, "Checking…", self.C["yellow"])
             self.after(0, self._log, "Fetching full store catalog…", "info")
@@ -1439,13 +1445,29 @@ class UnifiWatcherApp(tk.Tk):
 
             if self.watching:
                 self.after(0, self._set_status, "Watching…", self.C["green"])
-                interval = self.settings.get("poll_interval", 60)
-                self._force_flag = False
-                for i in range(interval, 0, -1):
-                    if not self.watching or self._force_flag: break
-                    self.after(0, self.countdown_lbl.config, {"text": f"Next check in {i}s"})
-                    time.sleep(1)
-                self.after(0, self.countdown_lbl.config, {"text": ""})
+                self._wait_for_next_cycle(self.settings.get("poll_interval", 60))
+
+    def _wait_for_next_cycle(self, interval):
+        """Count down to the next poll, waking immediately on stop or F5.
+
+        An Event rather than sleep(1) in a loop: Stop and Check Now used to
+        take up to a full second to register, and a force-check raised during
+        the fetch itself was cleared before the countdown ever saw it.
+        """
+        self._wake.clear()
+        deadline = time.monotonic() + interval
+        while self.watching:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            self.after(0, self._set_countdown, int(remaining) + 1)
+            if self._wake.wait(min(1.0, remaining)):
+                break
+        self.after(0, self._set_countdown, None)
+
+    def _set_countdown(self, seconds):
+        self.countdown_lbl.config(
+            text="" if seconds is None else f"Next check in {seconds}s")
 
     def _mark_delisted(self, slug, title):
         row = self.rows.get(slug)
