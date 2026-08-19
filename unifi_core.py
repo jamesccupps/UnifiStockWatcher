@@ -23,7 +23,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 log = logging.getLogger("unifi_watcher")
 
