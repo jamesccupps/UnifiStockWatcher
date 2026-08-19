@@ -499,15 +499,18 @@ def _find_product(page_props, slug):
         if p.get("slug") == slug:
             return p
 
+    for p in candidates:                       # renamed product
+        if slug in (p.get("historicalSlugs") or []):
+            return p
+
+    # Last resort. The page was reached by requesting this slug and following
+    # the store's own redirects, so whatever it considers "current" is what the
+    # slug resolves to. Checked last so an exact slug match always wins.
     current_id = page_props.get("currentProductId")
     if current_id:
         for p in candidates:
             if p.get("id") == current_id:
                 return p
-
-    for p in candidates:                       # renamed product
-        if slug in (p.get("historicalSlugs") or []):
-            return p
     return None
 
 

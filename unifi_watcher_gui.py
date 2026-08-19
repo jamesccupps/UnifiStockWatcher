@@ -130,6 +130,7 @@ class BrowseDialog(tk.Toplevel):
         self.check_vars       = {}
         self._row_pool        = []      # reused row widgets, see _rebuild
         self._filter_job      = None    # pending debounced filter
+        self._closed          = False   # guards callbacks from the fetch thread
 
         self.title("Add Items to Watch List")
         self.configure(bg=C["bg"])
@@ -245,35 +246,53 @@ class BrowseDialog(tk.Toplevel):
                   cursor="hand2", font=self.F(0, True),
                   padx=14, pady=7).pack(side="right")
 
+    def destroy(self):
+        self._closed = True
+        super().destroy()
+
+    def _post(self, fn, *args):
+        """Schedule fn on the Tk thread, unless the dialog has already closed.
+
+        The catalog fetch runs on a worker; closing the dialog mid-fetch used
+        to leave it calling after() on a destroyed widget, which raises out of
+        a thread with nowhere to report it.
+        """
+        if self._closed:
+            return
+        try:
+            self.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            self._closed = True
+
+    def _set_status(self, text, colour=None):
+        self.status_lbl.config(text=text, fg=colour or self.C["muted"])
+
     def _fetch(self):
         def _progress(pct):
-            try:
-                self.prog_var.set(pct)
-                self.status_lbl.config(text=f"Fetching… {pct}%")
-            except Exception:
-                pass
+            self.prog_var.set(pct)
+            self.status_lbl.config(text=f"Fetching… {pct}%")
 
         def run():
             try:
                 region = self.settings.get("region", "us")
-                self.after(0, lambda: self.status_lbl.config(
-                    text=f"Connecting to store ({region.upper()})…"))
+                self._post(self._set_status,
+                           f"Connecting to store ({region.upper()})…")
                 bid = get_build_id(region)
-                self.after(0, lambda: self.status_lbl.config(
-                    text="Fetching products…"))
+                self._post(self._set_status, "Fetching products…")
                 all_ = fetch_all_products(
                     bid, region,
-                    progress_cb=lambda p: self.after(0, _progress, p))
+                    progress_cb=lambda p: self._post(_progress, p))
                 self.all_prods = sorted(all_, key=lambda p: p.get("title", ""))
-                self.after(0, self._on_fetched)
+                self._post(self._on_fetched)
             except Exception as ex:
                 # Bind the message now. `ex` is unbound the moment this block
                 # exits, so a deferred lambda closing over it raises NameError
                 # inside the Tk callback and the dialog sits on
                 # "Fetching products…" forever with the real cause invisible.
-                self.after(0, self._on_fetch_failed, f"{type(ex).__name__}: {ex}")
+                self._post(self._on_fetch_failed, f"{type(ex).__name__}: {ex}")
                 log.exception("Browse fetch failed")
-        threading.Thread(target=run, daemon=True).start()
+        threading.Thread(target=run, daemon=True,
+                         name="unifi-browse-fetch").start()
 
     def _on_fetch_failed(self, msg):
         self.status_lbl.config(text=f"Error: {msg}", fg=self.C["red"])
@@ -393,11 +412,14 @@ class BrowseDialog(tk.Toplevel):
             if avail:
                 row["stock"].pack(side="right", padx=(0, 4))
 
-            if not row["frame"].winfo_ismapped():
+            # winfo_manager(), not winfo_ismapped(): a row inside a Toplevel
+            # that has not been mapped yet reports ismapped False even when it
+            # is packed, and re-packing moves it to the end of the pack order.
+            if not row["frame"].winfo_manager():
                 row["frame"].pack(fill="x", padx=8, pady=1)
 
         for row in self._row_pool[len(self.filtered):]:
-            if row["frame"].winfo_ismapped():
+            if row["frame"].winfo_manager():
                 row["frame"].pack_forget()
 
     def _toggle_all(self):
@@ -956,6 +978,7 @@ class UnifiWatcherApp(tk.Tk):
         self._wake          = threading.Event()  # interrupts the poll countdown
         self._prev_status   = {}   # slug -> (in_stock, title, price) for full-store diff
         self._delisted      = set()  # slugs the store no longer carries
+        self._closed        = False  # guards callbacks from worker threads
 
         self._apply_ttk_styles()
         self._build()
@@ -970,6 +993,24 @@ class UnifiWatcherApp(tk.Tk):
         self.bind("<Control-n>", lambda _: self._open_browse())
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _post(self, fn, *args):
+        """Schedule fn on the Tk thread, unless the window has already closed.
+
+        The watcher runs on a worker thread; closing the window mid-cycle left
+        it calling after() on a destroyed root, which raises out of a thread
+        with nowhere to report it.
+        """
+        if self._closed:
+            return
+        try:
+            self.after(0, fn, *args)
+        except (tk.TclError, RuntimeError):
+            self._closed = True
+
+    def destroy(self):
+        self._closed = True
+        super().destroy()
 
     def _on_close(self):
         """Stop the watcher and persist buffered history before exiting."""
@@ -1350,22 +1391,22 @@ class UnifiWatcherApp(tk.Tk):
                 in_stock, price = check_slug(build_id, item["slug"], region)
                 checked  = datetime.now().strftime("%H:%M:%S")
                 stock_history.record_check(item["slug"], item["title"], in_stock, price)
-                self.after(0, self._update_row, item["slug"], in_stock, checked, price)
+                self._post( self._update_row, item["slug"], in_stock, checked, price)
                 # Check for transition
                 prev = self._prev_status.get(item["slug"])
                 if prev is not None and prev[0] != in_stock:
-                    self.after(0, self._add_change, item["title"], in_stock, price)
+                    self._post( self._add_change, item["title"], in_stock, price)
                 self._prev_status[item["slug"]] = (in_stock, item["title"], price)
                 if in_stock and not self.notified.get(item["slug"]):
-                    self.after(0, self._on_in_stock, item)
+                    self._post( self._on_in_stock, item)
                 elif not in_stock:
                     self.notified[item["slug"]] = False
             except ProductNotFound:
                 self._delisted.add(item["slug"])
-                self.after(0, self._mark_delisted, item["slug"], item["title"])
+                self._post( self._mark_delisted, item["slug"], item["title"])
             except Exception as e:
                 log.exception("Quick-check failed for %s", item["slug"])
-                self.after(0, self._log, f"Quick-check failed: {e}", "err")
+                self._post( self._log, f"Quick-check failed: {e}", "err")
         threading.Thread(target=run, daemon=True).start()
 
     def _open_browse(self):
@@ -1414,8 +1455,8 @@ class UnifiWatcherApp(tk.Tk):
 
     def _watch_loop(self):
         while self.watching:
-            self.after(0, self._set_status, "Checking…", self.C["yellow"])
-            self.after(0, self._log, "Fetching full store catalog…", "info")
+            self._post( self._set_status, "Checking…", self.C["yellow"])
+            self._post( self._log, "Fetching full store catalog…", "info")
             region = self.settings.get("region", "us")
             try:
                 build_id = get_build_id(region)
@@ -1444,18 +1485,18 @@ class UnifiWatcherApp(tk.Tk):
                             was_avail = prev[0]
                             if was_avail != now_avail:
                                 changes += 1
-                                self.after(0, self._add_change,
+                                self._post( self._add_change,
                                            title, now_avail, price)
                     if changes:
-                        self.after(0, self._log,
+                        self._post( self._log,
                                    f"Detected {changes} stock change(s) across store.",
                                    "warn")
                     else:
-                        self.after(0, self._log,
+                        self._post( self._log,
                                    f"No stock changes across {len(current_status)} products.",
                                    "info")
                 else:
-                    self.after(0, self._log,
+                    self._post( self._log,
                                f"Baseline set: {len(current_status)} products cataloged.",
                                "info")
 
@@ -1482,26 +1523,26 @@ class UnifiWatcherApp(tk.Tk):
                         except ProductNotFound:
                             # Report once, then stop re-checking it every cycle.
                             self._delisted.add(slug)
-                            self.after(0, self._mark_delisted, slug, title)
+                            self._post( self._mark_delisted, slug, title)
                             continue
                         except StoreError as e:
-                            self.after(0, self._log,
+                            self._post( self._log,
                                        f"Could not check {title}: {e}", "err")
                             continue
 
                     stock_history.record_check(slug, title, in_stock, price)
-                    self.after(0, self._update_row, slug, in_stock, checked, price)
+                    self._post( self._update_row, slug, in_stock, checked, price)
 
                     if in_stock and not self.notified.get(slug):
-                        self.after(0, self._on_in_stock, item)
+                        self._post( self._on_in_stock, item)
                     elif not in_stock:
                         self.notified[slug] = False
 
             except Exception as e:
-                self.after(0, self._log, f"Store error: {e}", "err")
+                self._post( self._log, f"Store error: {e}", "err")
 
             if self.watching:
-                self.after(0, self._set_status, "Watching…", self.C["green"])
+                self._post( self._set_status, "Watching…", self.C["green"])
                 self._wait_for_next_cycle(self.settings.get("poll_interval", 60))
 
     def _wait_for_next_cycle(self, interval):
@@ -1517,10 +1558,10 @@ class UnifiWatcherApp(tk.Tk):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self.after(0, self._set_countdown, int(remaining) + 1)
+            self._post( self._set_countdown, int(remaining) + 1)
             if self._wake.wait(min(1.0, remaining)):
                 break
-        self.after(0, self._set_countdown, None)
+        self._post( self._set_countdown, None)
 
     def _set_countdown(self, seconds):
         self.countdown_lbl.config(
