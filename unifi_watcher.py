@@ -24,6 +24,7 @@ from unifi_core import (
     __version__, STORE_BASE, STORE_REGIONS,
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
+    refresh_category_coverage,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
     notify_windows, play_sound,
@@ -210,6 +211,8 @@ def main():
         now = datetime.now().strftime("%H:%M:%S")
         try:
             build_id = get_build_id(region)
+            for cat in refresh_category_coverage(build_id, region):
+                print(f"          Store added a category - now watching {cat}")
             # One catalog fetch per cycle covers every watched item. Asking per
             # item cost one request each - unthrottled, and growing with the
             # watch list - for data the catalog already carries.

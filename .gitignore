@@ -2,6 +2,7 @@
 watched_items.json
 settings.json
 stock_history.json
+category_cache.json
 
 # Python
 __pycache__/

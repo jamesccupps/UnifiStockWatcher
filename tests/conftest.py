@@ -73,7 +73,25 @@ def isolated_files(tmp_path, monkeypatch):
     monkeypatch.setattr(unifi_core, "CONFIG_FILE", tmp_path / "watched_items.json")
     monkeypatch.setattr(unifi_core, "SETTINGS_FILE", tmp_path / "settings.json")
     monkeypatch.setattr(unifi_core, "HISTORY_FILE", tmp_path / "stock_history.json")
+    monkeypatch.setattr(unifi_core, "CATEGORY_CACHE_FILE",
+                        tmp_path / "category_cache.json")
     return tmp_path
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    """Fail loudly if a mocked test reaches for the real network.
+
+    The suite is supposed to be offline; tests_live/ is where real traffic
+    belongs. Without this, adding a call like refresh_category_coverage to a
+    startup path silently turns the suite into an integration test - which is
+    how it went from 22s to 54s once.
+    """
+    def blocked(*a, **k):
+        raise AssertionError(
+            "test attempted a real HTTP request; mock it, or move the test "
+            "into tests_live/")
+    monkeypatch.setattr(unifi_core, "get_session", blocked)
 
 
 def variant(status="Available", amount=19900, currency="USD", **extra):

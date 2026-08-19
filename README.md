@@ -16,6 +16,7 @@ Built with Python and tkinter. No API key required — works by polling the publ
 - **Windows notifications + sound alerts** — System tray balloon notifications with optional sound when a watched item comes back in stock
 - **Auto browser launch** — Automatically opens the store page when something you're watching becomes available
 - **Price tracking** — Displays current prices with proper currency formatting (USD, EUR, GBP, CAD)
+- **Self-updating category list** — Follows the store's own redirects and adopts new categories automatically, so a rename or addition on Ubiquiti's side does not silently stop products being watched
 - **Restock estimates** — Shows the store's own restock date and how long an item has been sold out, e.g. `back ~7 Sep  ·  sold out 13 days`, on watched items and in the browse list
 - **Category filtering** — Browse dialog filters by product category (Gateways, Switching, WiFi, Cameras, Door Access, etc.)
 - **Multi-region support** — US, EU, UK, and Canada stores
@@ -128,12 +129,14 @@ These are created at runtime and excluded via `.gitignore`:
 The tool uses Ubiquiti's public Next.js store API:
 
 1. Fetches the `buildId` from the store homepage (cached 5 minutes, per region)
-2. Pulls product data from 9 category endpoints via `/_next/data/{buildId}/...`, fetched concurrently over one pooled connection
+2. Pulls product data from 8 category endpoints via `/_next/data/{buildId}/...`, fetched concurrently over one pooled connection
 3. Parses variant `status` fields (`Available`, `SoldOut`, `ComingSoon`)
 4. Diffs the full catalog against the previous snapshot to detect transitions
 5. Checks watched items against the catalog and fires notifications on availability
 
-Both the GUI and the CLI drive everything from that one catalog fetch, so a cycle costs 9 requests whether you watch 1 item or 50.
+Both the GUI and the CLI drive everything from that one catalog fetch, so a cycle costs 8 requests whether you watch 1 item or 50.
+
+Category slugs drift — cameras moved from `all-cameras-nvrs` to `all-physical-security` — so category fetches follow the store's redirects, and once a day the app reads the homepage's category list and adopts any new category that carries products the built-in list misses.
 
 ### Single-product lookups
 

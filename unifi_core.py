@@ -40,6 +40,7 @@ BASE_DIR       = Path(__file__).parent
 CONFIG_FILE    = BASE_DIR / "watched_items.json"
 SETTINGS_FILE  = BASE_DIR / "settings.json"
 HISTORY_FILE   = BASE_DIR / "stock_history.json"
+CATEGORY_CACHE_FILE = BASE_DIR / "category_cache.json"
 
 # ── Store constants ──────────────────────────────────────────────────────────
 
@@ -53,6 +54,7 @@ STORE_REGIONS = {
 STORE_BASE = "https://store.ui.com"
 MAX_REDIRECTS = 4
 CATEGORY_WORKERS = 4
+CATEGORY_DISCOVERY_TTL = 24 * 3600   # re-check the store's category list daily
 
 # Category slugs the store actually serves today. These get renamed - cameras
 # moved from all-cameras-nvrs to all-physical-security, and all-advanced-hosting
@@ -325,6 +327,101 @@ def invalidate_build_id(region=None):
 
 # ── Store API ────────────────────────────────────────────────────────────────
 
+def discover_category_paths(region="us"):
+    """Category paths linked from the store homepage.
+
+    The store does not publish a category index as JSON, but the rendered
+    homepage links every one of them.
+    """
+    region_path = STORE_REGIONS[region]["path"]
+    r = get_session().get(f"{STORE_BASE}/{region_path}", timeout=15)
+    r.raise_for_status()
+    pattern = rf'/{re.escape(region_path)}/(category/[a-z0-9\-]+)'
+    return sorted(set(re.findall(pattern, r.text)))
+
+
+def effective_categories(region="us"):
+    """The category list to fetch: the built-ins plus any learned extras."""
+    cache = read_json(CATEGORY_CACHE_FILE, {})
+    extras = cache.get("extra") if isinstance(cache, dict) else None
+    extras = [c for c in (extras or []) if isinstance(c, str)]
+    return list(dict.fromkeys(list(CATEGORIES) + extras))
+
+
+def refresh_category_coverage(build_id, region="us", force=False):
+    """Notice categories the store has that we do not, and adopt the useful ones.
+
+    Renames already self-heal, because _fetch_category follows the store's
+    redirects. This covers the other direction: a genuinely *new* category.
+
+    Most discovered paths are sub-views that return their parent's full
+    product set - all eight extras found at the time of writing added zero
+    unique products - so adopting every discovered path would double the
+    request count per cycle for nothing. Each unknown category is therefore
+    fetched once, kept only if it contributes products the built-ins miss,
+    and otherwise recorded as redundant so it is not re-examined.
+
+    Runs at most once a day. Returns the list of newly adopted categories.
+    """
+    cache = read_json(CATEGORY_CACHE_FILE, {})
+    if not isinstance(cache, dict):
+        cache = {}
+    checked = _parse_ts(cache.get("checked_at"))
+    if not force and checked:
+        age = (datetime.now(timezone.utc) - checked).total_seconds()
+        if age < CATEGORY_DISCOVERY_TTL:
+            return []
+
+    try:
+        discovered = discover_category_paths(region)
+    except Exception as e:
+        log.warning("Could not discover store categories: %s", e)
+        return []
+    if not discovered:
+        log.warning("Category discovery found nothing; leaving the list alone")
+        return []
+
+    known = set(effective_categories(region))
+    redundant = set(cache.get("redundant") or [])
+    unknown = [c for c in discovered if c not in known and c not in redundant]
+
+    adopted = []
+    if unknown:
+        covered = set()
+        for cat in known:
+            try:
+                covered |= set(_fetch_category(build_id, region, cat))
+            except Exception:
+                pass                      # a broken built-in is reported elsewhere
+
+        for cat in unknown:
+            try:
+                found = _fetch_category(build_id, region, cat)
+            except Exception as e:
+                log.warning("Could not examine new category %s: %s", cat, e)
+                continue
+            new_slugs = set(found) - covered
+            if new_slugs:
+                adopted.append(cat)
+                covered |= new_slugs
+                log.warning("Adopted new store category %s (+%d products)",
+                            cat, len(new_slugs))
+            else:
+                redundant.add(cat)
+
+    cache = {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "extra": sorted(set(cache.get("extra") or []) | set(adopted)),
+        "redundant": sorted(redundant),
+        "seen": discovered,
+    }
+    try:
+        write_json(CATEGORY_CACHE_FILE, cache)
+    except OSError as e:
+        log.warning("Could not save the category cache: %s", e)
+    return adopted
+
+
 def _fetch_category(build_id, region, cat):
     """Fetch one category page. Returns {slug: product}.
 
@@ -366,6 +463,11 @@ def _fetch_category(build_id, region, cat):
         target = page_props.get("__N_REDIRECT")
         if target:
             path = urlsplit(target).path.removesuffix(".json")
+            if "/category/" not in path:
+                # Landing pages like whats-new redirect to the homepage. That
+                # is not category drift, so it does not deserve a warning.
+                log.debug("%s redirects out of the category space (%s)", cat, path)
+                return {}
             log.warning("Category %s now redirects to %s - update CATEGORIES",
                         cat, path)
             continue
@@ -402,8 +504,9 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
     done = 0
     with ThreadPoolExecutor(max_workers=CATEGORY_WORKERS,
                             thread_name_prefix="unifi-cat") as pool:
+        cats = effective_categories(region)
         futures = {pool.submit(_fetch_category, build_id, region, cat): cat
-                   for cat in CATEGORIES}
+                   for cat in cats}
         for fut in as_completed(futures):
             cat = futures[fut]
             try:
@@ -418,12 +521,12 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
             done += 1
             if progress_cb:
                 try:
-                    progress_cb(int(done / len(CATEGORIES) * 100))
+                    progress_cb(int(done / len(cats) * 100))
                 except Exception:
                     log.exception("progress_cb raised")
 
     log.info("Fetched %d unique products across %d categories",
-             len(products), len(CATEGORIES))
+             len(products), len(cats))
     return list(products.values())
 
 
@@ -450,16 +553,41 @@ def _format_price(price_val):
     return str(price_val)
 
 
+def _is_unpriced(price_val):
+    """True for a Money value of zero, which the store uses for "no price yet".
+
+    Announced-but-unreleased products carry amount 0, and rendering that as
+    "$0.00" reads as free rather than unpriced. Nothing in this store is
+    legitimately free, so treating zero as absent is the safer reading.
+    """
+    if isinstance(price_val, dict):
+        return not price_val.get("amount")
+    if isinstance(price_val, (int, float)):
+        return not price_val
+    return False
+
+
 def get_price(product):
-    """Extract the display price from a product dict.
+    """Extract the display price from a product dict, or None if unpriced.
+
     displayPrice can be a Money dict like {'amount': 39900, 'currency': 'USD'}
     or a plain number or string.
     """
     for v in product.get("variants", []):
         price = v.get("displayPrice") or v.get("price")
-        if price is not None:
+        if price is not None and not _is_unpriced(price):
             return _format_price(price)
     return None
+
+
+def is_coming_soon(product):
+    """True when a product is announced but not yet purchasable.
+
+    Distinct from sold out: a ComingSoon item has never been on sale, so
+    "back ~" and "sold out for" would both be wrong.
+    """
+    statuses = {v.get("status") for v in product.get("variants", [])}
+    return bool(statuses) and "Available" not in statuses and "ComingSoon" in statuses
 
 
 # ── Restock estimates ────────────────────────────────────────────────────────

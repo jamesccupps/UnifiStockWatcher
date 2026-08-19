@@ -9,8 +9,25 @@
   products carry at least one. Watched rows and the browse list now show
   e.g. `back ~7 Sep  ·  sold out 13 days`.
 
+- Automatic category discovery. The store's category list is read from the
+  homepage once a day; a category that appears and carries products the
+  built-in list misses is adopted and reported. Sub-views that only repeat a
+  parent's products are recorded as redundant so they are not re-fetched -
+  adopting all of them would double the per-cycle request count for nothing.
+- A nightly CI job (`tests_live/`) checks the real store contract and opens an
+  issue when it breaks.
+
 ### Fixed
 
+- **Cameras and NVRs were not being watched at all.** Ubiquiti renamed
+  `all-cameras-nvrs` to `all-physical-security`, and `_fetch_category` did not
+  follow redirects, so the endpoint answered HTTP 200 with a redirect
+  directive and no products. 13 out-of-stock cameras and NVRs were invisible,
+  including the G6 Edge range, G4 Doorbell Pro and NVR G2 Pro. The catalog
+  goes from 421 to 487 products.
+- Announced-but-unreleased products showed `$0.00`, which reads as free. Zero
+  is the store's "no price yet", so it now shows no price and the item is
+  labelled `coming soon` rather than sold out.
 - Mouse wheel scrolling did nothing. The previous fix for the bind_all leak
   installed the binding on `<Enter>` and removed it on `<Leave>` of the
   container, and moving onto a child row fires `<Leave>` on the container -

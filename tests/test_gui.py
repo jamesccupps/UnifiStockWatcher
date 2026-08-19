@@ -64,6 +64,7 @@ def app(_session_app, isolated_files, monkeypatch):
     """Hand each test a clean app without building a new Tcl interpreter."""
     monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
     monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [])
+    monkeypatch.setattr(gui, "refresh_category_coverage", lambda *a, **k: [])
 
     a = _session_app
     _quiesce(a)

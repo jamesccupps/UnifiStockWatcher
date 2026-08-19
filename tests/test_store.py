@@ -333,3 +333,110 @@ def test_descriptions_are_none_without_data():
     p = product("x", status="SoldOut")
     assert unifi_core.describe_restock(p, now=NOW) is None
     assert unifi_core.describe_sold_out_for(p, now=NOW) is None
+
+
+# ── category discovery ───────────────────────────────────────────────────────
+
+HOMEPAGE_WITH_CATS = """
+<a href="/us/en/category/all-switching">Switching</a>
+<a href="/us/en/category/all-wifi">WiFi</a>
+<a href="/us/en/category/brand-new-thing">New</a>
+<a href="/us/en/category/all-switching">dupe</a>
+"""
+
+
+def test_discover_finds_category_paths(fake_session):
+    fake_session.routes = {"/us/en": FakeResponse(200, text=HOMEPAGE_WITH_CATS)}
+    assert unifi_core.discover_category_paths("us") == [
+        "category/all-switching", "category/all-wifi", "category/brand-new-thing"]
+
+
+def test_category_following_a_redirect_still_returns_products(fake_session):
+    """Regression: a renamed category silently dropped its whole product line."""
+    fake_session.routes = {
+        "/category/old-name.json": FakeResponse(
+            200, {"pageProps": {"__N_REDIRECT": "/us/en/category/new-name"}}),
+        "/category/new-name.json": FakeResponse(
+            200, category_page(product("cam-1"), product("cam-2"))),
+    }
+    found = unifi_core._fetch_category("bid", "us", "category/old-name")
+    assert sorted(found) == ["cam-1", "cam-2"]
+
+
+def test_category_redirecting_off_the_category_space_is_empty(fake_session):
+    """whats-new redirects to the homepage; that is not a category."""
+    fake_session.routes = {
+        "/category/whats-new.json": FakeResponse(
+            200, {"pageProps": {"__N_REDIRECT": "/us/en"}}),
+    }
+    assert unifi_core._fetch_category("bid", "us", "category/whats-new") == {}
+
+
+def test_coverage_adopts_a_category_that_adds_products(isolated_files, fake_session):
+    def route(url):
+        if "brand-new-thing" in url:
+            return FakeResponse(200, category_page(product("exclusive-item")))
+        if "/category/" in url:
+            return FakeResponse(200, category_page(product("known-item")))
+        return FakeResponse(200, text=HOMEPAGE_WITH_CATS)
+
+    fake_session.routes = {"/us/en": route}
+    adopted = unifi_core.refresh_category_coverage("bid", "us")
+    assert adopted == ["category/brand-new-thing"]
+    assert "category/brand-new-thing" in unifi_core.effective_categories("us")
+
+
+def test_coverage_ignores_a_category_that_adds_nothing(isolated_files, fake_session):
+    """Most discovered paths are sub-views returning the parent's set."""
+    fake_session.routes = {
+        "/us/en": lambda url: (
+            FakeResponse(200, category_page(product("same-item")))
+            if "/category/" in url else
+            FakeResponse(200, text=HOMEPAGE_WITH_CATS))
+    }
+    assert unifi_core.refresh_category_coverage("bid", "us") == []
+    assert "category/brand-new-thing" not in unifi_core.effective_categories("us")
+    cache = unifi_core.read_json(unifi_core.CATEGORY_CACHE_FILE, {})
+    assert "category/brand-new-thing" in cache["redundant"]
+
+
+def test_coverage_respects_its_ttl(isolated_files, fake_session):
+    fake_session.routes = {"/us/en": FakeResponse(200, text=HOMEPAGE_WITH_CATS)}
+    unifi_core.write_json(unifi_core.CATEGORY_CACHE_FILE, {
+        "checked_at": datetime.now(timezone.utc).isoformat(),
+        "extra": [], "redundant": [], "seen": []})
+    before = len(fake_session.calls)
+    assert unifi_core.refresh_category_coverage("bid", "us") == []
+    assert len(fake_session.calls) == before, "made requests despite a fresh cache"
+
+
+def test_coverage_survives_a_discovery_failure(isolated_files, fake_session):
+    fake_session.routes = {"/us/en": FakeResponse(500)}
+    assert unifi_core.refresh_category_coverage("bid", "us") == []
+    assert unifi_core.effective_categories("us") == list(unifi_core.CATEGORIES)
+
+
+# ── unpriced / coming-soon products ──────────────────────────────────────────
+
+def test_zero_price_reads_as_unpriced_not_free():
+    """Announced products carry amount 0; "$0.00" reads as free."""
+    p = product("x", status="ComingSoon", amount=0)
+    assert unifi_core.get_price(p) is None
+
+
+def test_a_real_price_still_wins_over_an_unpriced_variant():
+    p = product("x")
+    p["variants"] = [{"displayPrice": {"amount": 0, "currency": "USD"}},
+                     {"displayPrice": {"amount": 4900, "currency": "USD"}}]
+    assert unifi_core.get_price(p) == "$49.00"
+
+
+def test_is_coming_soon():
+    assert unifi_core.is_coming_soon(product("x", status="ComingSoon"))
+    assert not unifi_core.is_coming_soon(product("x", status="SoldOut"))
+    assert not unifi_core.is_coming_soon(product("x", status="Available"))
+    assert not unifi_core.is_coming_soon({"variants": []})
+
+
+def test_coming_soon_is_not_available():
+    assert not unifi_core.is_available(product("x", status="ComingSoon"))

@@ -36,8 +36,9 @@ from unifi_core import (
     ProductNotFound, StoreError,
     load_settings, save_settings, build_palette,
     get_build_id, invalidate_build_id, fetch_all_products,
+    refresh_category_coverage,
     is_available, get_price, check_slug,
-    describe_restock, describe_sold_out_for,
+    describe_restock, describe_sold_out_for, is_coming_soon,
     load_watched, save_watched, stock_history,
     notify_windows, play_sound,
     export_watchlist, import_watchlist,
@@ -59,6 +60,10 @@ def restock_note(product):
     """
     if is_available(product):
         return None
+    if is_coming_soon(product):
+        # Never been on sale, so "back ~" and "sold out for" would both lie.
+        eta = describe_restock(product)
+        return f"coming soon  ·  {eta}" if eta else "coming soon"
     bits = [b for b in (describe_restock(product),
                         describe_sold_out_for(product)) if b]
     return "  ·  ".join(bits) if bits else None
@@ -1509,7 +1514,25 @@ class UnifiWatcherApp(tk.Tk):
             self._wake.set()
             self._log("Forcing immediate check…", "info")
 
+    def _check_store_layout(self):
+        """Once a day, notice categories the store has added and adopt them.
+
+        Runs on the watcher thread so a slow or failed check never blocks the
+        UI, and never stops a cycle - a store layout change is worth knowing
+        about, but it is not worth missing a restock over.
+        """
+        try:
+            region = self.settings.get("region", "us")
+            adopted = refresh_category_coverage(get_build_id(region), region)
+        except Exception as e:
+            log.warning("Category coverage check failed: %s", e)
+            return
+        for cat in adopted:
+            self._post(self._log,
+                       f"Store added a category — now also watching {cat}", "warn")
+
     def _watch_loop(self):
+        self._check_store_layout()
         while self.watching:
             # Consume any pending wake here, at the start of the work, rather
             # than at the start of the countdown. Clearing it later would
