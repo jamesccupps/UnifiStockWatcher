@@ -56,6 +56,22 @@ def hsep(parent, C, pady=(0, 0)):
     f.pack(fill="x", pady=pady)
 
 
+MAX_LOG_LINES = 500
+MAX_CHANGE_LINES = 1000
+
+
+def _trim_text(widget, max_lines):
+    """Drop the oldest lines from a Text widget once it exceeds max_lines.
+
+    The activity log appends one line per watched item per cycle and never
+    trimmed, so a watcher left running overnight accumulated tens of
+    thousands of lines and the widget grew steadily slower to redraw.
+    """
+    lines = int(widget.index("end-1c").split(".")[0])
+    if lines > max_lines:
+        widget.delete("1.0", f"{lines - max_lines + 1}.0")
+
+
 def bind_wheel(canvas, scrollable):
     """Scroll `canvas` while the pointer is over it.
 
@@ -1515,6 +1531,7 @@ class UnifiWatcherApp(tk.Tk):
         if price:
             self.changes_text.insert("end", f"  {price}", "price")
         self.changes_text.insert("end", "\n")
+        _trim_text(self.changes_text, MAX_CHANGE_LINES)
         self.changes_text.see("end")
         self.changes_text.configure(state="disabled")
         self._changes_count_lbl.config(text=f"({self._change_count})")
@@ -1553,6 +1570,7 @@ class UnifiWatcherApp(tk.Tk):
         self.log_text.configure(state="normal")
         self.log_text.insert("end", f"[{ts}] ", "time")
         self.log_text.insert("end", msg + "\n", tag)
+        _trim_text(self.log_text, MAX_LOG_LINES)
         self.log_text.see("end")
         self.log_text.configure(state="disabled")
 
