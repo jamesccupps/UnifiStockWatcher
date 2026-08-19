@@ -902,6 +902,17 @@ class UnifiWatcherApp(tk.Tk):
         self.bind("<F5>", lambda _: self._force_check())
         self.bind("<Control-n>", lambda _: self._open_browse())
 
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _on_close(self):
+        """Stop the watcher and persist buffered history before exiting."""
+        self.watching = False
+        try:
+            stock_history.flush()
+        except Exception:
+            log.exception("Could not flush stock history on exit")
+        self.destroy()
+
     def _apply_ttk_styles(self):
         C = self.C
         s = ttk.Style(self)

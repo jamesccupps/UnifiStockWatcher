@@ -7,6 +7,7 @@ import os
 import re
 import json
 import time
+import atexit
 import logging
 import threading
 import subprocess
@@ -102,22 +103,57 @@ DEFAULT_SETTINGS = {
     "max_retries":    3,
 }
 
+# ── JSON persistence ─────────────────────────────────────────────────────────
+
+def read_json(path, default):
+    """Read a JSON file, returning `default` if it is missing or unreadable.
+
+    Explicit UTF-8: the default is the locale codec, which on a Windows box is
+    cp1252 and silently mangles any watch list produced elsewhere.
+    """
+    path = Path(path)
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        log.warning("Could not read %s (%s); falling back to default", path.name, e)
+        return default
+
+
+def write_json(path, data):
+    """Write JSON atomically, so an interrupted write cannot truncate the file.
+
+    write_text() opens with O_TRUNC: a crash, a full disk, or the machine
+    sleeping mid-write leaves an empty or half-written watch list. Write to a
+    sibling temp file and rename - os.replace is atomic on NTFS and POSIX.
+    """
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            fh.write(payload)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 # ── Settings load/save ───────────────────────────────────────────────────────
 
 def load_settings():
-    if SETTINGS_FILE.exists():
-        try:
-            s = json.loads(SETTINGS_FILE.read_text())
-            merged = DEFAULT_SETTINGS.copy()
-            merged.update(s)
-            return merged
-        except Exception:
-            pass
-    return DEFAULT_SETTINGS.copy()
+    merged = DEFAULT_SETTINGS.copy()
+    stored = read_json(SETTINGS_FILE, {})
+    if isinstance(stored, dict):
+        merged.update(stored)
+    return merged
 
 
 def save_settings(s):
-    SETTINGS_FILE.write_text(json.dumps(s, indent=2))
+    write_json(SETTINGS_FILE, s)
 
 
 # ── Palette builder ──────────────────────────────────────────────────────────
@@ -438,47 +474,79 @@ def check_slug(build_id, slug, region="us", retries=3):
 
 # ── Config load/save ─────────────────────────────────────────────────────────
 
+def _normalise_watched(data):
+    """Keep only well-formed entries, filling in optional fields."""
+    items = []
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict) or not item.get("slug"):
+            log.warning("Skipping malformed watch list entry: %r", item)
+            continue
+        item.setdefault("title", item["slug"])
+        item.setdefault("favourite", False)
+        item.setdefault("price", None)
+        item.setdefault("added_at", None)
+        items.append(item)
+    return items
+
+
 def load_watched():
-    if CONFIG_FILE.exists():
-        try:
-            data = json.loads(CONFIG_FILE.read_text())
-            for item in data:
-                item.setdefault("favourite", False)
-                item.setdefault("price", None)
-                item.setdefault("added_at", None)
-            return data
-        except Exception:
-            return []
-    return []
+    return _normalise_watched(read_json(CONFIG_FILE, []))
 
 
 def save_watched(items):
-    CONFIG_FILE.write_text(json.dumps(items, indent=2))
+    write_json(CONFIG_FILE, items)
 
 
 # ── Stock history ────────────────────────────────────────────────────────────
 
-class StockHistory:
-    """Persist stock check events to a JSON file for history/stats."""
+MAX_HISTORY_EVENTS = 2000
 
-    def __init__(self, path=HISTORY_FILE):
-        self._path = path
+
+def _empty_history():
+    return {"events": [], "stats": {"total_checks": 0, "in_stock_alerts": 0}}
+
+
+class StockHistory:
+    """Stock check events, persisted to JSON for history and stats.
+
+    Writes are deferred rather than issued per event: the watcher records one
+    event per watched item per cycle, and re-serialising the whole 2000-event
+    file each time meant tens of megabytes of disk churn per hour for a
+    modest watch list. flush() is called on a timer and at shutdown.
+    """
+
+    def __init__(self, path=HISTORY_FILE, autosave_after=25):
+        self._path = Path(path)
         self._lock = threading.Lock()
         self._data = self._load()
+        self._dirty = False
+        self._unsaved = 0
+        self._autosave_after = autosave_after
 
     def _load(self):
-        if self._path.exists():
-            try:
-                return json.loads(self._path.read_text())
-            except Exception:
-                pass
-        return {"events": [], "stats": {"total_checks": 0, "in_stock_alerts": 0}}
+        data = read_json(self._path, None)
+        if not isinstance(data, dict):
+            return _empty_history()
+        # Tolerate a hand-edited or partially written file.
+        merged = _empty_history()
+        if isinstance(data.get("events"), list):
+            merged["events"] = data["events"]
+        if isinstance(data.get("stats"), dict):
+            merged["stats"].update(data["stats"])
+        return merged
 
-    def _save(self):
-        # Keep only last 2000 events to prevent unbounded growth
-        if len(self._data["events"]) > 2000:
-            self._data["events"] = self._data["events"][-2000:]
-        self._path.write_text(json.dumps(self._data, indent=2))
+    def _save_locked(self):
+        if len(self._data["events"]) > MAX_HISTORY_EVENTS:
+            self._data["events"] = self._data["events"][-MAX_HISTORY_EVENTS:]
+        write_json(self._path, self._data)
+        self._dirty = False
+        self._unsaved = 0
+
+    def flush(self):
+        """Persist pending events. Safe to call when nothing has changed."""
+        with self._lock:
+            if self._dirty:
+                self._save_locked()
 
     def record_check(self, slug, title, in_stock, price=None):
         with self._lock:
@@ -492,7 +560,10 @@ class StockHistory:
                 "in_stock": in_stock,
                 "price":    price,
             })
-            self._save()
+            self._dirty = True
+            self._unsaved += 1
+            if self._unsaved >= self._autosave_after:
+                self._save_locked()
 
     def get_stats(self):
         with self._lock:
@@ -502,24 +573,26 @@ class StockHistory:
         with self._lock:
             events = self._data["events"]
             if slug:
-                events = [e for e in events if e["slug"] == slug]
-            return events[-limit:]
+                events = [e for e in events if e.get("slug") == slug]
+            return events[-limit:] if limit else list(events)
 
     def last_in_stock(self, slug):
         with self._lock:
             for e in reversed(self._data["events"]):
-                if e["slug"] == slug and e["in_stock"]:
+                if e.get("slug") == slug and e.get("in_stock"):
                     return e["ts"]
             return None
 
     def clear(self):
         with self._lock:
-            self._data = {"events": [], "stats": {"total_checks": 0, "in_stock_alerts": 0}}
-            self._save()
+            self._data = _empty_history()
+            self._save_locked()
 
 
-# Global instance
+# Global instance. Deferred writes mean pending events must be flushed on the
+# way out, including on Ctrl+C or a closed GUI window.
 stock_history = StockHistory()
+atexit.register(stock_history.flush)
 
 
 # ── Notification ─────────────────────────────────────────────────────────────
@@ -580,23 +653,35 @@ def play_sound():
 def export_watchlist(filepath):
     """Export current watch list to a JSON file."""
     items = load_watched()
-    Path(filepath).write_text(json.dumps(items, indent=2))
+    write_json(filepath, items)
     return len(items)
 
 
 def import_watchlist(filepath):
-    """Import watch list from a JSON file, merging with existing."""
-    new_items = json.loads(Path(filepath).read_text())
-    existing  = load_watched()
-    slugs     = {w["slug"] for w in existing}
-    added     = 0
-    for item in new_items:
-        if item.get("slug") and item["slug"] not in slugs:
-            item.setdefault("favourite", False)
-            item.setdefault("price", None)
-            item.setdefault("added_at", datetime.now().isoformat())
-            existing.append(item)
-            slugs.add(item["slug"])
-            added += 1
+    """Import a watch list from a JSON file, merging with the existing one.
+
+    Imported entries come from outside the application, so they are normalised
+    and their fields constrained before being persisted. Only the keys the
+    application actually uses are carried over.
+    """
+    raw = read_json(filepath, None)
+    if not isinstance(raw, list):
+        raise ValueError("Watch list file must contain a JSON array of items.")
+
+    existing = load_watched()
+    slugs    = {w["slug"] for w in existing}
+    added    = 0
+    for item in _normalise_watched(raw):
+        if item["slug"] in slugs:
+            continue
+        existing.append({
+            "slug":      str(item["slug"])[:200],
+            "title":     str(item["title"])[:200],
+            "favourite": bool(item["favourite"]),
+            "price":     item["price"] if isinstance(item["price"], str) else None,
+            "added_at":  item["added_at"] or datetime.now().isoformat(),
+        })
+        slugs.add(item["slug"])
+        added += 1
     save_watched(existing)
     return added
