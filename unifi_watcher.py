@@ -10,6 +10,7 @@ Commands:
 
 import sys
 import time
+import logging
 import webbrowser
 from datetime import datetime
 
@@ -21,6 +22,7 @@ if not ensure_requests():
 
 from unifi_core import (
     STORE_BASE, STORE_REGIONS,
+    ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
@@ -109,7 +111,7 @@ def run_setup():
         price_str = f" ({w['price']})" if w.get("price") else ""
         print(f"    - {w['title']}{price_str}")
     print()
-    print(f"  Saved to watched_items.json")
+    print("  Saved to watched_items.json")
     print("=" * 60)
     print()
 
@@ -139,7 +141,7 @@ def test_mode():
     time.sleep(2)
 
     IN_STOCK_TEST = {"title": "Access Point U7 Pro", "slug": "u7-pro"}
-    print(f"Step 2/3  Verifying stock detection…")
+    print("Step 2/3  Verifying stock detection…")
     print(f"          Checking: {IN_STOCK_TEST['title']}")
     try:
         build_id = get_build_id(region)
@@ -202,46 +204,61 @@ def main():
     print()
 
     notified = {w["slug"]: False for w in watched}
+    delisted = set()
 
     while True:
         now = datetime.now().strftime("%H:%M:%S")
         try:
             build_id = get_build_id(region)
+            # One catalog fetch per cycle covers every watched item. Asking per
+            # item cost one request each - unthrottled, and growing with the
+            # watch list - for data the catalog already carries.
+            catalog = {p["slug"]: p for p in fetch_all_products(build_id, region)
+                       if p.get("slug")}
         except Exception as e:
-            print(f"[{now}]  WARNING: Could not get build ID: {e}")
+            print(f"[{now}]  WARNING: could not reach the store: {e}")
             time.sleep(interval)
             continue
 
         print(f"[{now}]  Checking…")
         for item in watched:
             slug, title = item["slug"], item["title"]
+            if slug in delisted:
+                continue
             try:
-                in_stock, price = check_slug(build_id, slug, region)
-                price_str = f" ({price})" if price else ""
-
-                stock_history.record_check(slug, title, in_stock, price)
-
-                if in_stock:
-                    print(f"          {'IN STOCK':<16}  {title}{price_str}")
+                product = catalog.get(slug)
+                if product is not None:
+                    in_stock, price = is_available(product), get_price(product)
                 else:
-                    print(f"          {'out of stock':<16}  {title}{price_str}")
-
-                if in_stock and not notified[slug]:
-                    notify_windows(
-                        f"IN STOCK: {title}",
-                        f"{title} is now available on the Unifi store!"
-                    )
-                    if settings.get("sound_alerts", True):
-                        play_sound()
-                    if settings.get("auto_open_url", True):
-                        webbrowser.open(f"{store_home(region)}/products/{slug}")
-                    notified[slug] = True
-                    print("          >>> Notification sent!")
-                elif not in_stock:
-                    notified[slug] = False
-            except Exception as e:
+                    in_stock, price = check_slug(build_id, slug, region)
+            except ProductNotFound:
+                delisted.add(slug)
+                print(f"          {'DELISTED':<16}  {title} — no longer on the store")
+                continue
+            except StoreError as e:
                 print(f"          WARNING  {title}: {e}")
+                continue
 
+            price_str = f" ({price})" if price else ""
+            stock_history.record_check(slug, title, in_stock, price)
+            label = "IN STOCK" if in_stock else "out of stock"
+            print(f"          {label:<16}  {title}{price_str}")
+
+            if in_stock and not notified[slug]:
+                notify_windows(
+                    f"IN STOCK: {title}",
+                    f"{title} is now available on the Unifi store!"
+                )
+                if settings.get("sound_alerts", True):
+                    play_sound()
+                if settings.get("auto_open_url", True):
+                    webbrowser.open(f"{store_home(region)}/products/{slug}")
+                notified[slug] = True
+                print("          >>> Notification sent!")
+            elif not in_stock:
+                notified[slug] = False
+
+        stock_history.flush()
         print(f"          Next check in {interval}s\n")
         time.sleep(interval)
 
@@ -249,15 +266,21 @@ def main():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if "--test" in sys.argv:
-        test_mode()
-    elif "--setup" in sys.argv:
-        run_setup()
-        print("Starting watcher in 3 seconds…\n")
-        time.sleep(3)
-        main()
-    else:
-        try:
+    logging.basicConfig(
+        level=logging.WARNING,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        datefmt="%H:%M:%S")
+    try:
+        if "--test" in sys.argv:
+            test_mode()
+        elif "--setup" in sys.argv:
+            run_setup()
+            print("Starting watcher in 3 seconds…\n")
+            time.sleep(3)
             main()
-        except KeyboardInterrupt:
-            print("\nStopped.")
+        else:
+            main()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    finally:
+        stock_history.flush()
