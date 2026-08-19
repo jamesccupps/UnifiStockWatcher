@@ -1,0 +1,9 @@
+* text=auto
+
+# CMD is unreliable with LF-only batch files - goto/labels can misbehave.
+*.bat text eol=crlf
+
+*.py   text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
