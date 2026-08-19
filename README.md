@@ -16,6 +16,7 @@ Built with Python and tkinter. No API key required — works by polling the publ
 - **Windows notifications + sound alerts** — System tray balloon notifications with optional sound when a watched item comes back in stock
 - **Auto browser launch** — Automatically opens the store page when something you're watching becomes available
 - **Price tracking** — Displays current prices with proper currency formatting (USD, EUR, GBP, CAD)
+- **Restock estimates** — Shows the store's own restock date and how long an item has been sold out, e.g. `back ~7 Sep  ·  sold out 13 days`, on watched items and in the browse list
 - **Category filtering** — Browse dialog filters by product category (Gateways, Switching, WiFi, Cameras, Door Access, etc.)
 - **Multi-region support** — US, EU, UK, and Canada stores
 - **Configurable poll interval** — 15s to 600s, adjustable from Settings

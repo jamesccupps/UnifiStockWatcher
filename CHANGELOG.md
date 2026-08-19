@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Restock estimates. The store sends `restockEtaAt` and `soldOutAt` on every
+  catalog fetch and the app discarded them; a little over half of out-of-stock
+  products carry at least one. Watched rows and the browse list now show
+  e.g. `back ~7 Sep  ·  sold out 13 days`.
+
+### Fixed
+
+- Mouse wheel scrolling did nothing. The previous fix for the bind_all leak
+  installed the binding on `<Enter>` and removed it on `<Leave>` of the
+  container, and moving onto a child row fires `<Leave>` on the container -
+  so it was torn down exactly where scrolling happens.
+
 ## v2.0.0
 
 A correctness release. Stock detection was wrong for a large part of the

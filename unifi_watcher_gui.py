@@ -37,6 +37,7 @@ from unifi_core import (
     load_settings, save_settings, build_palette,
     get_build_id, invalidate_build_id, fetch_all_products,
     is_available, get_price, check_slug,
+    describe_restock, describe_sold_out_for,
     load_watched, save_watched, stock_history,
     notify_windows, play_sound,
     export_watchlist, import_watchlist,
@@ -47,6 +48,20 @@ log = logging.getLogger("unifi_watcher.gui")
 
 def store_home(region="us"):
     return f"{STORE_BASE}/{STORE_REGIONS[region]['path']}"
+
+
+def restock_note(product):
+    """One-line restock summary for an out-of-stock product, or None.
+
+    e.g. "back ~7 Sep  ·  sold out 13 days". The store sends restockEtaAt and
+    soldOutAt on every catalog fetch; a little over half of out-of-stock
+    products carry at least one of them.
+    """
+    if is_available(product):
+        return None
+    bits = [b for b in (describe_restock(product),
+                        describe_sold_out_for(product)) if b]
+    return "  ·  ".join(bits) if bits else None
 
 
 # ── Widget helpers ────────────────────────────────────────────────────────────
@@ -385,6 +400,7 @@ class BrowseDialog(tk.Toplevel):
         price_lbl = tk.Label(row, bg=C["bg"], fg=C["muted"], font=self.F(-1))
         stock_lbl = tk.Label(row, text="IN STOCK", bg="#1a3a2a", fg=C["green"],
                              font=self.F(-2, True), padx=5, pady=1)
+        note_lbl = tk.Label(row, bg=C["bg"], fg=C["yellow"], font=self.F(-2))
 
         def enter(_, r=row):
             if r._hover_enabled:
@@ -398,7 +414,8 @@ class BrowseDialog(tk.Toplevel):
         row.bind("<Leave>", leave)
         cb.bind("<Enter>", enter)
         cb.bind("<Leave>", leave)
-        return {"frame": row, "cb": cb, "price": price_lbl, "stock": stock_lbl}
+        return {"frame": row, "cb": cb, "price": price_lbl,
+                "stock": stock_lbl, "note": note_lbl}
 
     def _rebuild(self):
         """Render self.filtered by reconfiguring pooled rows.
@@ -434,11 +451,17 @@ class BrowseDialog(tk.Toplevel):
             # keep the badge left of the price the way it renders initially.
             row["price"].pack_forget()
             row["stock"].pack_forget()
+            row["note"].pack_forget()
             if price:
                 row["price"].config(text=price)
                 row["price"].pack(side="right", padx=(0, 8))
             if avail:
                 row["stock"].pack(side="right", padx=(0, 4))
+            else:
+                note = restock_note(p)
+                if note:
+                    row["note"].config(text=note)
+                    row["note"].pack(side="right", padx=(0, 10))
 
             # winfo_manager(), not winfo_ismapped(): a row inside a Toplevel
             # that has not been mapped yet reports ismapped False even when it
@@ -595,7 +618,7 @@ class WatchedRow(tk.Frame):
         rem.bind("<Leave>",    lambda _: rem.config(fg=C["muted"]))
         tooltip(rem, "Remove from watch list")
 
-    def update_status(self, in_stock, checked_at=None, price=None):
+    def update_status(self, in_stock, checked_at=None, price=None, note=None):
         C = self.C
         self.in_stock = in_stock
         if in_stock is None:
@@ -615,8 +638,12 @@ class WatchedRow(tk.Frame):
             sub_parts.append(f"Checked {checked_at}")
         if price:
             sub_parts.append(price)
+        if note:
+            sub_parts.append(note)
         if sub_parts:
             self.sub.config(text="  ·  ".join(sub_parts))
+            # The restock estimate is the actionable part of the line.
+            self.sub.config(fg=C["yellow"] if note else C["muted"])
 
     def mark_delisted(self):
         """The store no longer carries this slug; stop implying it is tracked."""
@@ -1417,14 +1444,15 @@ class UnifiWatcherApp(tk.Tk):
                 region   = self.settings.get("region", "us")
                 build_id = get_build_id(region)
                 in_stock, price = check_slug(build_id, item["slug"], region)
+                note = None
                 checked  = datetime.now().strftime("%H:%M:%S")
                 stock_history.record_check(item["slug"], item["title"], in_stock, price)
-                self._post( self._update_row, item["slug"], in_stock, checked, price)
+                self._post( self._update_row, item["slug"], in_stock, checked, price, note)
                 # Check for transition
                 prev = self._prev_status.get(item["slug"])
                 if prev is not None and prev[0] != in_stock:
                     self._post( self._add_change, item["title"], in_stock, price)
-                self._prev_status[item["slug"]] = (in_stock, item["title"], price)
+                self._prev_status[item["slug"]] = (in_stock, item["title"], price, note)
                 if in_stock and not self.notified.get(item["slug"]):
                     self._post( self._on_in_stock, item)
                 elif not in_stock:
@@ -1498,7 +1526,7 @@ class UnifiWatcherApp(tk.Tk):
                 all_products = fetch_all_products(build_id, region)
                 checked = datetime.now().strftime("%H:%M:%S")
 
-                # Build current status map: slug -> (in_stock, title, price)
+                # slug -> (in_stock, title, price, restock note)
                 current_status = {}
                 for p in all_products:
                     slug = p.get("slug")
@@ -1507,12 +1535,12 @@ class UnifiWatcherApp(tk.Tk):
                     avail = is_available(p)
                     price = get_price(p)
                     title = p.get("title", slug)
-                    current_status[slug] = (avail, title, price)
+                    current_status[slug] = (avail, title, price, restock_note(p))
 
                 # ── Diff against previous state for stock changes feed ─
                 if self._prev_status:
                     changes = 0
-                    for slug, (now_avail, title, price) in current_status.items():
+                    for slug, (now_avail, title, price, _) in current_status.items():
                         prev = self._prev_status.get(slug)
                         if prev is not None:
                             was_avail = prev[0]
@@ -1545,10 +1573,11 @@ class UnifiWatcherApp(tk.Tk):
                         continue
                     status_entry = current_status.get(slug)
                     if status_entry:
-                        in_stock, _, price = status_entry
+                        in_stock, _, price, note = status_entry
                     else:
                         # Not in the catalog: either genuinely delisted, or a
                         # product the category pages do not carry. Ask directly.
+                        note = None
                         try:
                             in_stock, price = check_slug(
                                 build_id, slug, region,
@@ -1564,7 +1593,7 @@ class UnifiWatcherApp(tk.Tk):
                             continue
 
                     stock_history.record_check(slug, title, in_stock, price)
-                    self._post( self._update_row, slug, in_stock, checked, price)
+                    self._post( self._update_row, slug, in_stock, checked, price, note)
 
                     if in_stock and not self.notified.get(slug):
                         self._post( self._on_in_stock, item)
@@ -1609,9 +1638,9 @@ class UnifiWatcherApp(tk.Tk):
             row.mark_delisted()
         self._log(f"{title} is no longer listed on the store — skipping.", "warn")
 
-    def _update_row(self, slug, in_stock, checked_at, price=None):
+    def _update_row(self, slug, in_stock, checked_at, price=None, note=None):
         row = self.rows.get(slug)
-        if row: row.update_status(in_stock, checked_at, price)
+        if row: row.update_status(in_stock, checked_at, price, note)
         title = next((w["title"] for w in self.watched if w["slug"] == slug), slug)
         tag = "ok" if in_stock else "info"
         price_text = f" ({price})" if price else ""

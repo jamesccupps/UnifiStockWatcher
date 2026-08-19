@@ -309,6 +309,30 @@ def test_wheel_scrolls_when_the_pointer_is_over_a_row(app):
         app.withdraw()
 
 
+def test_wheel_binding_survives_leaving_the_container(app):
+    """Regression, without needing on-screen geometry.
+
+    The old binding was installed on <Enter> of the container and removed on
+    <Leave>. Moving onto a child row fires <Leave> on the container, so the
+    binding vanished exactly where scrolling happens. Crossing events need no
+    real pointer, so this check is deterministic where the geometry-based one
+    can only skip.
+    """
+    app.watched = [{"title": "P", "slug": "s", "favourite": False}]
+    app._refresh_list()
+
+    assert app.bind("<MouseWheel>"), "no wheel binding on the toplevel"
+
+    app.list_canvas.event_generate("<Enter>")
+    app.update()
+    app.list_frame.event_generate("<Leave>")     # i.e. pointer moved onto a row
+    app.update()
+
+    assert app.bind("<MouseWheel>"), \
+        "leaving the container tore down the wheel binding"
+    assert gui._wheel_target(app.rows["s"].title_lbl) is app.list_canvas
+
+
 def test_wheel_target_resolves_through_nested_widgets(app):
     app.watched = [{"title": "P", "slug": "s", "favourite": False}]
     app._refresh_list()

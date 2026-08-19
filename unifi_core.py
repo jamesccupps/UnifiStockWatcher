@@ -13,7 +13,7 @@ import threading
 import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
-from datetime import datetime
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
@@ -435,6 +435,87 @@ def get_price(product):
         if price is not None:
             return _format_price(price)
     return None
+
+
+# ── Restock estimates ────────────────────────────────────────────────────────
+#
+# The store already sends these on every catalog fetch and the app used to
+# discard them. Roughly a third of out-of-stock products carry a restock date
+# and half carry a sell-out timestamp, which is exactly what a restock watcher
+# wants on screen.
+
+def _parse_ts(value):
+    """Parse an ISO timestamp or date, returning an aware datetime or None.
+
+    Python 3.10's fromisoformat rejects a trailing Z, and CI covers 3.10.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def get_restock_eta(product):
+    """Earliest restock estimate across variants, as a datetime, or None."""
+    etas = [_parse_ts(v.get("restockEtaAt")) for v in product.get("variants", [])]
+    etas = [d for d in etas if d]
+    return min(etas) if etas else None
+
+
+def get_sold_out_at(product):
+    """Most recent sell-out timestamp across variants, as a datetime, or None."""
+    vals = [_parse_ts(v.get("soldOutAt")) for v in product.get("variants", [])]
+    vals = [d for d in vals if d]
+    return max(vals) if vals else None
+
+
+def _plural(n, unit):
+    return f"{n} {unit}" if n == 1 else f"{n} {unit}s"
+
+
+def describe_restock(product, now=None):
+    """Short human phrase for a product's restock estimate, or None.
+
+    e.g. "back ~7 Sep", "back ~tomorrow", "restock date passed".
+    """
+    eta = get_restock_eta(product)
+    if eta is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    days = (eta.date() - now.date()).days
+    if days < 0:
+        return "restock date passed"
+    if days == 0:
+        return "back ~today"
+    if days == 1:
+        return "back ~tomorrow"
+    if days <= 14:
+        return f"back ~{_plural(days, 'day')}"
+    return f"back ~{eta.strftime('%d %b').lstrip('0')}"
+
+
+def describe_sold_out_for(product, now=None):
+    """Short human phrase for how long a product has been sold out, or None."""
+    since = get_sold_out_at(product)
+    if since is None:
+        return None
+    now = now or datetime.now(timezone.utc)
+    # Calendar days, not elapsed 24-hour periods: something that sold out on
+    # the 6th reads as "13 days" on the 19th, which is how people count, and
+    # it matches describe_restock.
+    days = (now.date() - since.date()).days
+    if days < 0:
+        return None
+    if days == 0:
+        return "sold out today"
+    if days == 1:
+        return "sold out 1 day"
+    if days < 60:
+        return f"sold out {days} days"
+    return f"sold out {_plural(days // 30, 'month')}"
 
 
 def _data_url(build_id, path):

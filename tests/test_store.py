@@ -264,3 +264,72 @@ def test_build_id_missing_raises_store_error(fake_session):
     fake_session.routes = {"/us/en": FakeResponse(200, text="<html>nope</html>")}
     with pytest.raises(StoreError):
         unifi_core.get_build_id("us")
+
+
+# ── restock estimates ────────────────────────────────────────────────────────
+
+from datetime import datetime, timezone  # noqa: E402
+
+NOW = datetime(2026, 8, 19, 12, 0, tzinfo=timezone.utc)
+
+
+def _oos(**variant_extra):
+    p = product("x", status="SoldOut")
+    p["variants"][0].update(variant_extra)
+    return p
+
+
+def test_parse_ts_accepts_trailing_z():
+    """Python 3.10's fromisoformat rejects Z, and CI covers 3.10."""
+    got = unifi_core._parse_ts("2026-08-06T14:50:25.663Z")
+    assert got.tzinfo is not None
+    assert got.year, got.month == (2026, 8)
+
+
+def test_parse_ts_accepts_a_bare_date():
+    assert unifi_core._parse_ts("2026-09-07").date().isoformat() == "2026-09-07"
+
+
+@pytest.mark.parametrize("value", [None, "", "not a date", 12345, {}])
+def test_parse_ts_rejects_junk(value):
+    assert unifi_core._parse_ts(value) is None
+
+
+def test_restock_eta_takes_the_earliest_variant():
+    p = product("x", status="SoldOut")
+    p["variants"] = [{"restockEtaAt": "2026-10-01"}, {"restockEtaAt": "2026-09-07"}]
+    assert unifi_core.get_restock_eta(p).date().isoformat() == "2026-09-07"
+
+
+def test_sold_out_at_takes_the_most_recent_variant():
+    p = product("x", status="SoldOut")
+    p["variants"] = [{"soldOutAt": "2026-08-01T00:00:00Z"},
+                     {"soldOutAt": "2026-08-06T00:00:00Z"}]
+    assert unifi_core.get_sold_out_at(p).day == 6
+
+
+@pytest.mark.parametrize("eta, expected", [
+    ("2026-08-19", "back ~today"),
+    ("2026-08-20", "back ~tomorrow"),
+    ("2026-08-26", "back ~7 days"),
+    ("2026-09-07", "back ~7 Sep"),
+    ("2026-08-01", "restock date passed"),
+])
+def test_describe_restock(eta, expected):
+    assert unifi_core.describe_restock(_oos(restockEtaAt=eta), now=NOW) == expected
+
+
+@pytest.mark.parametrize("since, expected", [
+    ("2026-08-19T06:00:00Z", "sold out today"),
+    ("2026-08-18T06:00:00Z", "sold out 1 day"),
+    ("2026-08-06T14:50:00Z", "sold out 13 days"),
+    ("2026-05-01T00:00:00Z", "sold out 3 months"),
+])
+def test_describe_sold_out_for(since, expected):
+    assert unifi_core.describe_sold_out_for(_oos(soldOutAt=since), now=NOW) == expected
+
+
+def test_descriptions_are_none_without_data():
+    p = product("x", status="SoldOut")
+    assert unifi_core.describe_restock(p, now=NOW) is None
+    assert unifi_core.describe_sold_out_for(p, now=NOW) is None
