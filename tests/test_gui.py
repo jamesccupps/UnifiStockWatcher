@@ -257,6 +257,68 @@ def test_a_delisted_item_is_checked_once(app, monkeypatch):
     assert app.rows["gone"].badge.cget("text") == "DELISTED"
 
 
+# ── mouse wheel ──────────────────────────────────────────────────────────────
+
+def test_wheel_scrolls_when_the_pointer_is_over_a_row(app):
+    """Regression: scrolling did nothing at all.
+
+    The binding was installed on <Enter> and torn down on <Leave> of the
+    container. Moving the pointer onto a child row fires <Leave> on that
+    container, so the binding was removed exactly where the user scrolls —
+    and the pointer is essentially always over a row.
+    """
+    app.watched = [{"title": f"P{i:02d}", "slug": f"s{i}", "favourite": False}
+                   for i in range(30)]
+    app._refresh_list()
+    app.deiconify()
+    app.geometry("700x800+40+40")
+    try:
+        cv = app.list_canvas
+        # Wait for the window manager to actually map the window; winfo_rootx
+        # and winfo_containing are meaningless until it has.
+        under = px = py = None
+        for _ in range(100):
+            app.update_idletasks()
+            app.update()
+            if cv.winfo_width() > 1 and cv.winfo_height() > 1:
+                px = cv.winfo_rootx() + cv.winfo_width() // 2
+                py = cv.winfo_rooty() + cv.winfo_height() // 2
+                under = app.winfo_containing(px, py)
+                if under is not None:
+                    break
+            time.sleep(0.02)
+        if under is None:
+            pytest.skip("window never mapped; no usable on-screen geometry")
+
+        # the pointer is over a row, not the canvas
+        assert under is not cv
+        assert gui._wheel_target(under) is cv
+
+        before = cv.yview()[0]
+        under.event_generate("<MouseWheel>", delta=-120,
+                             rootx=px, rooty=py, x=5, y=5)
+        app.update()
+        assert cv.yview()[0] > before, "wheel over a row did not scroll"
+
+        mid = cv.yview()[0]
+        under.event_generate("<MouseWheel>", delta=120,
+                             rootx=px, rooty=py, x=5, y=5)
+        app.update()
+        assert cv.yview()[0] < mid, "wheel up did not scroll back"
+    finally:
+        app.withdraw()
+
+
+def test_wheel_target_resolves_through_nested_widgets(app):
+    app.watched = [{"title": "P", "slug": "s", "favourite": False}]
+    app._refresh_list()
+    row = app.rows["s"]
+    # a deeply nested child still resolves to the scrolling canvas
+    assert gui._wheel_target(row.title_lbl) is app.list_canvas
+    assert gui._wheel_target(app.list_canvas) is app.list_canvas
+    assert gui._wheel_target(app.log_text) is None      # not a scroll area
+
+
 # ── text widget bounds ───────────────────────────────────────────────────────
 
 def test_activity_log_is_bounded(app):

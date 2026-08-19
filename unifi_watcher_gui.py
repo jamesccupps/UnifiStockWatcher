@@ -72,28 +72,56 @@ def _trim_text(widget, max_lines):
         widget.delete("1.0", f"{lines - max_lines + 1}.0")
 
 
-def bind_wheel(canvas, scrollable):
-    """Scroll `canvas` while the pointer is over it.
+def _wheel_target(widget):
+    """The nearest enclosing canvas registered as wheel-scrollable."""
+    while widget is not None:
+        if getattr(widget, "_wheel_scrolls", False):
+            return widget
+        widget = widget.master
+    return None
 
-    Deliberately not bind_all: that is application-wide, so the browse dialog's
-    binding replaced the main list's and then outlived its own canvas, leaving
-    every later wheel event raising "invalid command name" and the main list
-    unscrollable. Enter/Leave scopes the binding to the widget that owns it.
+
+def _dispatch_wheel(event):
+    """Scroll whichever registered canvas is under the pointer."""
+    try:
+        under = event.widget.winfo_containing(event.x_root, event.y_root)
+    except tk.TclError:
+        return None
+    target = _wheel_target(under)
+    if target is None:
+        return None
+    try:
+        target.yview_scroll(-1 * (event.delta // 120), "units")
+    except tk.TclError:
+        return None
+    return "break"
+
+
+def bind_wheel(canvas, scrollable=None):
+    """Let the wheel scroll `canvas` whenever the pointer is anywhere over it.
+
+    Two approaches that do not work, both of which shipped:
+
+    bind_all is application-wide, so the browse dialog's binding replaced the
+    main list's and then outlived its own canvas — every later wheel event
+    raised "invalid command name" and the watch list stopped scrolling.
+
+    Enabling on <Enter> and tearing down on <Leave> is worse: moving the
+    pointer onto a child row fires <Leave> on the container, so the binding
+    was removed exactly where the user actually scrolls. Scrolling did
+    nothing at all.
+
+    Bind on the toplevel instead — a toplevel is in the bindtags of every
+    widget inside it, so this catches wheel events over any descendant while
+    staying scoped to that window. The handler resolves the target from the
+    pointer position rather than closing over one canvas, so a destroyed
+    canvas is simply never found again.
     """
-    def on_wheel(e):
-        canvas.yview_scroll(-1 * (e.delta // 120), "units")
-        return "break"
-
-    def enable(_=None):
-        canvas.bind_all("<MouseWheel>", on_wheel)
-
-    def disable(_=None):
-        canvas.unbind_all("<MouseWheel>")
-
-    for w in (canvas, scrollable):
-        w.bind("<Enter>", enable, add="+")
-        w.bind("<Leave>", disable, add="+")
-    canvas.bind("<Destroy>", disable, add="+")
+    canvas._wheel_scrolls = True
+    top = canvas.winfo_toplevel()
+    if not getattr(top, "_wheel_bound", False):
+        top._wheel_bound = True
+        top.bind("<MouseWheel>", _dispatch_wheel, add="+")
 
 
 def tooltip(widget, text):
