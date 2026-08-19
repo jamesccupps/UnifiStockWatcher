@@ -21,6 +21,11 @@ except Exception:
     except Exception:
         pass
 
+# ── Dependency bootstrap (must precede the unifi_core import) ─────────────────
+from _bootstrap import ensure_requests, missing_message
+
+_HAVE_REQUESTS = ensure_requests()
+
 # ── Core imports ──────────────────────────────────────────────────────────────
 from unifi_core import (
     REQUESTS_OK, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS,
@@ -1467,12 +1472,10 @@ class UnifiWatcherApp(tk.Tk):
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not REQUESTS_OK:
-        try:
-            subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "requests", "--quiet"])
-            import requests
-        except Exception:
-            pass
+    if not _HAVE_REQUESTS:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showerror("Missing dependency", missing_message())
+        sys.exit(1)
     app = UnifiWatcherApp()
     app.mainloop()

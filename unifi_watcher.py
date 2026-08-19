@@ -13,6 +13,12 @@ import time
 import webbrowser
 from datetime import datetime
 
+from _bootstrap import ensure_requests, missing_message
+
+if not ensure_requests():
+    print(missing_message())
+    sys.exit(1)
+
 from unifi_core import (
     REQUESTS_OK, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS,
     load_settings, get_build_id, fetch_all_products,
@@ -243,12 +249,6 @@ def main():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    if not REQUESTS_OK:
-        print("Installing requests…")
-        import subprocess
-        subprocess.check_call(
-            [sys.executable, "-m", "pip", "install", "requests", "--quiet"])
-
     if "--test" in sys.argv:
         test_mode()
     elif "--setup" in sys.argv:
