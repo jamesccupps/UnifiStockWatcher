@@ -11,6 +11,7 @@ import logging
 import threading
 import subprocess
 from pathlib import Path
+from urllib.parse import urlsplit
 from datetime import datetime
 
 try:
@@ -20,6 +21,14 @@ except ImportError:
     REQUESTS_OK = False
 
 log = logging.getLogger("unifi_watcher")
+
+
+class StoreError(RuntimeError):
+    """The store could not be reached, or answered something unusable."""
+
+
+class ProductNotFound(StoreError):
+    """The slug does not resolve to a product any more."""
 
 # ── Paths ────────────────────────────────────────────────────────────────────
 
@@ -38,6 +47,7 @@ STORE_REGIONS = {
 }
 
 STORE_BASE = "https://store.ui.com"
+MAX_REDIRECTS = 4
 
 CATEGORIES = [
     "category/all-cloud-gateways",
@@ -179,7 +189,7 @@ class BuildIdCache:
         r.raise_for_status()
         m = re.search(r'"buildId":"([^"]+)"', r.text)
         if not m:
-            raise RuntimeError("Could not find buildId on store homepage.")
+            raise StoreError("Could not find buildId on store homepage.")
 
         with self._lock:
             self._build_id = m.group(1)
@@ -309,66 +319,121 @@ def get_price(product):
     return None
 
 
-def check_slug(build_id, slug, region="us", retries=3):
-    """Check if a product slug is in stock. Returns (in_stock: bool, price: str|None)."""
-    region_path = STORE_REGIONS[region]["path"]
-    url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/products/{slug}.json"
+def _data_url(build_id, path):
+    return f"{STORE_BASE}/_next/data/{build_id}{path}.json"
 
+
+def _redirect_path(target, slug):
+    """Normalise a redirect target to a /<region>/<...> data path."""
+    path = urlsplit(target).path.split("?")[0].removesuffix(".json")
+    if path.rstrip("/").endswith("/404"):
+        raise ProductNotFound(f"{slug}: no longer on the store")
+    return path
+
+
+def _fetch_product_page(build_id, slug, region="us"):
+    """Return the pageProps of a product page, following Next.js data redirects.
+
+    The store answers /products/<slug>.json for roughly half the catalog with
+    HTTP 200 and a body of {"pageProps": {"__N_REDIRECT": "<canonical path>"}},
+    and occasionally with a bare 307 carrying no Location header. Both mean the
+    product lives under a category/collection path, not at the bare slug.
+    """
+    path = f"/{STORE_REGIONS[region]['path']}/products/{slug}"
+    for _ in range(MAX_REDIRECTS):
+        r = requests.get(_data_url(build_id, path), headers=HEADERS, timeout=15)
+
+        if r.status_code in (301, 302, 303, 307, 308):
+            # Next.js signals its own redirects out of band; a plain 307 here
+            # usually carries x-nextjs-redirect rather than Location.
+            loc = r.headers.get("Location") or r.headers.get("x-nextjs-redirect")
+            if not loc:
+                raise StoreError(
+                    f"{slug}: store returned {r.status_code} with no redirect target")
+            path = _redirect_path(loc, slug)
+            continue
+
+        r.raise_for_status()
+        page_props = r.json().get("pageProps", {})
+
+        target = page_props.get("__N_REDIRECT")
+        if target:
+            path = _redirect_path(target, slug)
+            continue
+
+        return page_props
+
+    raise StoreError(f"{slug}: too many redirects (>{MAX_REDIRECTS})")
+
+
+def _find_product(page_props, slug):
+    """Pick the requested product out of a product page.
+
+    A product page carries its whole collection plus related/upsell products.
+    Matching must be by identity - the previous implementation walked the JSON
+    for the first "variants" key it could find, which on a page like ua-g2
+    returns ua-g3's variants and reports the wrong product's stock.
+    """
+    candidates = list((page_props.get("collection") or {}).get("products") or [])
+    for key in ("product", "currentProduct"):
+        if isinstance(page_props.get(key), dict):
+            candidates.append(page_props[key])
+
+    for p in candidates:
+        if p.get("slug") == slug:
+            return p
+
+    current_id = page_props.get("currentProductId")
+    if current_id:
+        for p in candidates:
+            if p.get("id") == current_id:
+                return p
+
+    for p in candidates:                       # renamed product
+        if slug in (p.get("historicalSlugs") or []):
+            return p
+    return None
+
+
+def check_slug(build_id, slug, region="us", retries=3):
+    """Check a single product slug. Returns (in_stock: bool, price: str|None).
+
+    Raises ProductNotFound if the slug no longer resolves, and StoreError if
+    the store cannot be reached. It never reports a fabricated "out of stock" -
+    that silently defeats the entire point of a stock watcher.
+    """
     last_err = None
     for attempt in range(retries):
         try:
-            r = requests.get(url, headers=HEADERS, timeout=15)
-            r.raise_for_status()
+            page_props = _fetch_product_page(build_id, slug, region)
+            product = _find_product(page_props, slug)
+            if product is None:
+                raise ProductNotFound(f"{slug}: not present on its own page")
+            return is_available(product), get_price(product)
 
-            def find_variants(obj):
-                if isinstance(obj, dict):
-                    if "variants" in obj:
-                        return obj["variants"]
-                    for v in obj.values():
-                        res = find_variants(v)
-                        if res is not None:
-                            return res
-                elif isinstance(obj, list):
-                    for item in obj:
-                        res = find_variants(item)
-                        if res is not None:
-                            return res
-                return None
-
-            variants = find_variants(r.json().get("pageProps", {}))
-            if not variants:
-                return False, None
-
-            in_stock = any(v.get("status") == "Available" for v in variants)
-            price = None
-            for v in variants:
-                p = v.get("displayPrice") or v.get("price")
-                if p is not None:
-                    price = _format_price(p)
-                    break
-                    break
-            return in_stock, price
-
+        except ProductNotFound:
+            raise
         except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                # Build ID may have rotated
-                if attempt < retries - 1:
-                    invalidate_build_id()
-                    try:
-                        build_id = get_build_id(region, force=True)
-                        url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/products/{slug}.json"
-                    except Exception:
-                        pass
-                last_err = e
-            else:
-                last_err = e
+            status = e.response.status_code if e.response is not None else None
+            if status == 404:
+                # Either the buildId rotated or the product is gone. Ask for a
+                # fresh buildId and compare: only a genuine rotation justifies
+                # discarding the cached id that every other item is using.
+                fresh = get_build_id(region, force=True)
+                if fresh != build_id:
+                    build_id = fresh
+                    last_err = e
+                    continue
+                raise ProductNotFound(f"{slug}: no longer on the store") from e
+            last_err = e
         except Exception as e:
             last_err = e
 
         if attempt < retries - 1:
             time.sleep(2 ** attempt)
 
-    raise last_err or RuntimeError(f"Failed to check {slug} after {retries} attempts")
+    raise StoreError(f"{slug}: failed after {retries} attempts") from last_err
+
 
 
 # ── Config load/save ─────────────────────────────────────────────────────────
