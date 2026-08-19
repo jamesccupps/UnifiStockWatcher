@@ -6,10 +6,14 @@ Features: price tracking, stock history, category filters, sound alerts,
           auto-start, per-item quick-check, retry with backoff.
 """
 
-import re, sys, json, time, threading, webbrowser, subprocess, ctypes
+import sys
+import time
+import logging
+import threading
+import webbrowser
+import ctypes
 import tkinter as tk
 from tkinter import ttk, messagebox, colorchooser, filedialog
-from pathlib import Path
 from datetime import datetime
 
 # ── DPI fix (must be before Tk()) ─────────────────────────────────────────────
@@ -28,15 +32,17 @@ _HAVE_REQUESTS = ensure_requests()
 
 # ── Core imports ──────────────────────────────────────────────────────────────
 from unifi_core import (
-    REQUESTS_OK, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS,
-    HEADERS, DEFAULT_SETTINGS,
+    STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS, DEFAULT_SETTINGS,
+    ProductNotFound, StoreError,
     load_settings, save_settings, build_palette,
-    get_build_id, invalidate_build_id, fetch_all_products,
+    get_build_id, fetch_all_products,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
     notify_windows, play_sound,
     export_watchlist, import_watchlist,
 )
+
+log = logging.getLogger("unifi_watcher.gui")
 
 
 def store_home(region="us"):
@@ -220,13 +226,17 @@ class BrowseDialog(tk.Toplevel):
                 self.all_prods = sorted(all_, key=lambda p: p.get("title", ""))
                 self.after(0, self._on_fetched)
             except Exception as ex:
-                import traceback
-                tb = traceback.format_exc()
-                print(f"[UnifiWatcher] Browse fetch error:\n{tb}")
-                self.after(0, lambda: self.status_lbl.config(
-                    text=f"Error: {ex}", fg=self.C["red"]))
-                self.after(0, self.prog.pack_forget)
+                # Bind the message now. `ex` is unbound the moment this block
+                # exits, so a deferred lambda closing over it raises NameError
+                # inside the Tk callback and the dialog sits on
+                # "Fetching products…" forever with the real cause invisible.
+                self.after(0, self._on_fetch_failed, f"{type(ex).__name__}: {ex}")
+                log.exception("Browse fetch failed")
         threading.Thread(target=run, daemon=True).start()
+
+    def _on_fetch_failed(self, msg):
+        self.status_lbl.config(text=f"Error: {msg}", fg=self.C["red"])
+        self.prog.pack_forget()
 
     def _on_fetched(self):
         try:
@@ -237,9 +247,7 @@ class BrowseDialog(tk.Toplevel):
                 fg=self.C["muted"])
             self.prog.pack_forget()
         except Exception as ex:
-            import traceback
-            tb = traceback.format_exc()
-            print(f"[UnifiWatcher] Browse populate error:\n{tb}")
+            log.exception("Browse populate failed")
             self.status_lbl.config(
                 text=f"Error displaying products: {ex}", fg=self.C["red"])
             self.prog.pack_forget()
@@ -862,9 +870,6 @@ class UnifiWatcherApp(tk.Tk):
         self._apply_ttk_styles()
         self._build()
         self._refresh_list()
-
-        if not REQUESTS_OK:
-            self._log("requests library not installed — run: pip install requests", "warn")
 
         # Auto-start if enabled
         if self.settings.get("auto_start") and self.watched:

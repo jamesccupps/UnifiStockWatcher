@@ -20,7 +20,7 @@ if not ensure_requests():
     sys.exit(1)
 
 from unifi_core import (
-    REQUESTS_OK, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS,
+    STORE_BASE, STORE_REGIONS,
     load_settings, get_build_id, fetch_all_products,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
