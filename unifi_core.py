@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlsplit
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 try:
     import requests
@@ -49,6 +50,7 @@ STORE_REGIONS = {
 
 STORE_BASE = "https://store.ui.com"
 MAX_REDIRECTS = 4
+CATEGORY_WORKERS = 4
 
 CATEGORIES = [
     "category/all-cloud-gateways",
@@ -200,42 +202,109 @@ def build_palette(s):
     }
 
 
+# ── HTTP session ─────────────────────────────────────────────────────────────
+
+_session = None
+_session_lock = threading.Lock()
+
+
+def get_session():
+    """Process-wide requests.Session.
+
+    Every call previously opened a fresh connection, paying a full TCP and TLS
+    handshake per request - nine of them per poll cycle, plus one per quick
+    check. A pooled session reuses the connection and adds bounded retries for
+    transient network and 5xx failures.
+    """
+    global _session
+    with _session_lock:
+        if _session is None:
+            from requests.adapters import HTTPAdapter
+            from urllib3.util.retry import Retry
+
+            s = requests.Session()
+            s.headers.update(HEADERS)
+            adapter = HTTPAdapter(
+                pool_connections=4,
+                pool_maxsize=CATEGORY_WORKERS * 2,
+                max_retries=Retry(
+                    total=2,
+                    connect=2,
+                    read=2,
+                    status=2,
+                    backoff_factor=0.5,
+                    status_forcelist=(500, 502, 503, 504),
+                    allowed_methods=frozenset(["GET"]),
+                    raise_on_status=False,
+                ),
+            )
+            s.mount("https://", adapter)
+            s.mount("http://", adapter)
+            _session = s
+        return _session
+
+
+def close_session():
+    """Release pooled connections (tests, and clean shutdown)."""
+    global _session
+    with _session_lock:
+        if _session is not None:
+            _session.close()
+            _session = None
+
+
 # ── Build ID cache ───────────────────────────────────────────────────────────
 
 class BuildIdCache:
-    """Cache the Next.js buildId to avoid hammering the store homepage."""
+    """Cache the Next.js buildId per region, fetching it at most once at a time.
+
+    Keyed by region: the id is currently identical across the four stores, but
+    nothing in the API guarantees that, and serving a US id for an EU request
+    would 404 every product on the first cycle after a region switch.
+
+    The fetch happens under the lock so that a fleet of category workers all
+    starting at once - or all reacting to the same rotation - makes one
+    homepage request between them rather than one each.
+    """
 
     def __init__(self, ttl_seconds=300):
-        self._lock     = threading.Lock()
-        self._build_id = None
-        self._fetched  = None
-        self._ttl      = ttl_seconds
+        self._lock    = threading.Lock()
+        self._entries = {}          # region -> (build_id, fetched_at)
+        self._ttl     = ttl_seconds
+
+    def _fresh(self, region):
+        entry = self._entries.get(region)
+        if not entry:
+            return None
+        build_id, fetched = entry
+        if (datetime.now() - fetched).total_seconds() >= self._ttl:
+            return None
+        return build_id
 
     def get(self, region="us", force=False):
         with self._lock:
-            now = datetime.now()
-            if (not force
-                    and self._build_id
-                    and self._fetched
-                    and (now - self._fetched).total_seconds() < self._ttl):
-                return self._build_id
+            if not force:
+                cached = self._fresh(region)
+                if cached:
+                    return cached
 
-        store_home = f"{STORE_BASE}/{STORE_REGIONS[region]['path']}"
-        r = requests.get(store_home, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        m = re.search(r'"buildId":"([^"]+)"', r.text)
-        if not m:
-            raise StoreError("Could not find buildId on store homepage.")
+            store_home = f"{STORE_BASE}/{STORE_REGIONS[region]['path']}"
+            r = get_session().get(store_home, headers=HEADERS, timeout=15)
+            r.raise_for_status()
+            m = re.search(r'"buildId":"([^"]+)"', r.text)
+            if not m:
+                raise StoreError("Could not find buildId on store homepage.")
 
+            build_id = m.group(1)
+            self._entries[region] = (build_id, datetime.now())
+            return build_id
+
+    def invalidate(self, region=None):
         with self._lock:
-            self._build_id = m.group(1)
-            self._fetched  = datetime.now()
-            return self._build_id
-
-    def invalidate(self):
-        with self._lock:
-            self._build_id = None
-            self._fetched  = None
+            if region is None:
+                self._entries.clear()
+            else:
+                self._entries.pop(region, None)
 
 
 # Global instance
@@ -246,77 +315,88 @@ def get_build_id(region="us", force=False):
     return _build_cache.get(region, force)
 
 
-def invalidate_build_id():
-    _build_cache.invalidate()
+def invalidate_build_id(region=None):
+    _build_cache.invalidate(region)
 
 
 # ── Store API ────────────────────────────────────────────────────────────────
 
+def _fetch_category(build_id, region, cat):
+    """Fetch one category page. Returns {slug: product}.
+
+    A 404 usually means the buildId rotated between the homepage fetch and
+    this call, so refresh it once and retry with the new id.
+    """
+    region_path = STORE_REGIONS[region]["path"]
+    found = {}
+    for attempt in range(2):
+        url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/{cat}.json"
+        try:
+            r = get_session().get(url, timeout=15)
+            r.raise_for_status()
+            page_props = r.json().get("pageProps", {})
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 404 and attempt == 0:
+                fresh = get_build_id(region, force=True)
+                if fresh != build_id:
+                    build_id = fresh
+                    continue
+            raise
+
+        for subcat in page_props.get("subCategories", []):
+            for p in subcat.get("products", []):
+                if p.get("slug"):
+                    p["_category"] = cat
+                    found[p["slug"]] = p
+        # Belt-and-suspenders: a flat products list, in case UI ever switches a
+        # category page to that shape. setdefault so the richer subCategory
+        # entry wins if both exist.
+        for p in page_props.get("products", []):
+            if p.get("slug"):
+                p.setdefault("_category", cat)
+                found.setdefault(p["slug"], p)
+        return found
+    return found
+
+
 def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
-    """Fetch all products from every category, deduplicated. Returns list of dicts.
+    """Fetch every category, deduplicated by slug. Returns a list of dicts.
 
-    progress_cb(int_0_to_100) is called after each category.
-    error_cb(category_slug, exception) is called on per-category failures so callers
-    (e.g. the GUI) can surface them instead of only printing to stdout.
+    progress_cb(int_0_to_100) is called as categories complete.
+    error_cb(category_slug, exception) reports per-category failures so callers
+    can surface them rather than losing them to stdout.
 
-    If a category 404s — usually because the Next.js buildId rotated mid-fetch —
-    the cache is invalidated and that category is retried once with a fresh id.
+    The nine category pages are independent, so they are fetched concurrently.
+    Sequentially, with a 0.3s pause between each, a cycle spent most of its time
+    waiting on round trips it did not need to serialise.
     """
     products = {}
-    region_path = STORE_REGIONS[region]["path"]
-    for i, cat in enumerate(CATEGORIES):
-        for attempt in range(2):  # one retry slot for build_id rotation
-            url = f"{STORE_BASE}/_next/data/{build_id}/{region_path}/{cat}.json"
+    done = 0
+    with ThreadPoolExecutor(max_workers=CATEGORY_WORKERS,
+                            thread_name_prefix="unifi-cat") as pool:
+        futures = {pool.submit(_fetch_category, build_id, region, cat): cat
+                   for cat in CATEGORIES}
+        for fut in as_completed(futures):
+            cat = futures[fut]
             try:
-                r = requests.get(url, headers=HEADERS, timeout=15)
-                r.raise_for_status()
-                data = r.json()
-                pp = data.get("pageProps", {})
-                # Primary path: products nested under subCategories
-                for subcat in pp.get("subCategories", []):
-                    for p in subcat.get("products", []):
-                        if p.get("slug"):
-                            p["_category"] = cat
-                            products[p["slug"]] = p
-                # Belt-and-suspenders: a flat products list, in case UI ever
-                # switches a category page to that shape. setdefault so the
-                # richer subCategory entry wins if both exist.
-                for p in pp.get("products", []):
-                    if p.get("slug"):
-                        p.setdefault("_category", cat)
-                        products.setdefault(p["slug"], p)
-                break  # success
-            except requests.exceptions.HTTPError as e:
-                # 404 typically means buildId rotated between homepage fetch
-                # and this category call. Invalidate + retry once.
-                if (e.response is not None
-                        and e.response.status_code == 404
-                        and attempt == 0):
-                    try:
-                        invalidate_build_id()
-                        build_id = get_build_id(region, force=True)
-                        continue  # retry the same category with fresh id
-                    except Exception:
-                        pass
-                print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
-                if error_cb:
-                    try:
-                        error_cb(cat, e)
-                    except Exception:
-                        pass
-                break
+                products.update(fut.result())
             except Exception as e:
-                print(f"[UnifiWatcher] Category fetch failed: {cat} — {e}")
+                log.warning("Category fetch failed: %s — %s", cat, e)
                 if error_cb:
                     try:
                         error_cb(cat, e)
                     except Exception:
-                        pass
-                break
-        if progress_cb:
-            progress_cb(int((i + 1) / len(CATEGORIES) * 100))
-        time.sleep(0.3)
-    print(f"[UnifiWatcher] Fetched {len(products)} unique products across {len(CATEGORIES)} categories")
+                        log.exception("error_cb raised")
+            done += 1
+            if progress_cb:
+                try:
+                    progress_cb(int(done / len(CATEGORIES) * 100))
+                except Exception:
+                    log.exception("progress_cb raised")
+
+    log.info("Fetched %d unique products across %d categories",
+             len(products), len(CATEGORIES))
     return list(products.values())
 
 
@@ -377,7 +457,7 @@ def _fetch_product_page(build_id, slug, region="us"):
     """
     path = f"/{STORE_REGIONS[region]['path']}/products/{slug}"
     for _ in range(MAX_REDIRECTS):
-        r = requests.get(_data_url(build_id, path), headers=HEADERS, timeout=15)
+        r = get_session().get(_data_url(build_id, path), timeout=15)
 
         if r.status_code in (301, 302, 303, 307, 308):
             # Next.js signals its own redirects out of band; a plain 307 here
