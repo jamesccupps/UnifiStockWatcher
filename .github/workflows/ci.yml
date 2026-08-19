@@ -68,7 +68,7 @@ jobs:
             # Job logs need a signed-in session; annotations do not. Surface the
             # failure summary as one so it is readable from the run page and via
             # the public checks API.
-            summary=$(sed -n '/short test summary/,$p' pytest.log | head -40)
+            summary=$(grep -E '^(FAILED|ERROR)' pytest.log | head -30)
             if [ -z "$summary" ]; then summary=$(tail -40 pytest.log); fi
             encoded=$(printf '%s\n' "$summary" | awk '{printf "%s%%0A", $0}')
             echo "::error title=pytest failed on ${RUNNER_OS} py${{ matrix.python-version }}::${encoded}"

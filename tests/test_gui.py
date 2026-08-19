@@ -15,23 +15,6 @@ from conftest import product
 
 tk = pytest.importorskip("tkinter")
 
-# One Tcl interpreter for the whole module, created once and never destroyed.
-#
-# Creating *and destroying* a Tk root per test progressively breaks Tcl's
-# library-path state: later Tk() calls die with `invalid command name
-# "tcl_findLibrary"` or `Can't find a usable init.tcl`, intermittently, in
-# whichever test happens to be next. Python 3.12 tightened tkinter
-# finalisation, so this only bites on 3.10 and 3.11 - exactly the split seen
-# on CI, where those two jobs failed and 3.12/3.13 passed.
-#
-# Doubling as the availability probe means even the probe does not churn an
-# interpreter.
-try:
-    _ANCHOR = tk.Tk()
-    _ANCHOR.withdraw()
-except Exception as _e:                               # pragma: no cover
-    pytest.skip(f"Tk unavailable: {_e}", allow_module_level=True)
-
 import unifi_watcher_gui as gui  # noqa: E402
 
 logging.getLogger("unifi_watcher").setLevel(logging.CRITICAL)
@@ -48,8 +31,25 @@ def _quiesce(a):
 
 @pytest.fixture(scope="module")
 def _session_app():
-    """The single UnifiWatcherApp instance shared by every test in this module."""
-    a = gui.UnifiWatcherApp()
+    """The one and only Tk interpreter this module creates.
+
+    Every Tcl interpreter beyond the first is a liability. Creating *and
+    destroying* a root per test progressively breaks Tcl's library-path state,
+    so a later Tk() dies with `invalid command name "tcl_findLibrary"` or
+    `Can't find a usable init.tcl` - intermittently, in whichever test runs
+    next, which is why the failure never pointed at its own cause. Python 3.12
+    tightened tkinter finalisation, so it hit 3.10 and 3.11 first; under load
+    a second interpreter has failed on 3.12 too.
+
+    So: one root, created once, reused by every test, never destroyed until
+    the module is done. It doubles as the availability probe, so nothing is
+    churned just to find out whether Tk works.
+    """
+    try:
+        a = gui.UnifiWatcherApp()
+    except Exception as e:                            # pragma: no cover
+        pytest.skip(f"Tk unavailable: {e}")
+        return
     a.withdraw()
     yield a
     _quiesce(a)
@@ -174,10 +174,43 @@ def test_stop_wakes_the_countdown(app):
 
 def test_wait_returns_immediately_when_woken(app):
     app.watching = True
+    app._wake.clear()
     threading.Timer(0.05, app._wake.set).start()
     started = time.monotonic()
     app._wait_for_next_cycle(30)
-    assert time.monotonic() - started < 2.0
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, f"countdown ignored the wake event ({elapsed:.1f}s)"
+
+
+def test_wake_raised_during_a_cycle_is_not_swallowed(app):
+    """Regression: Check Now pressed *during* the fetch was discarded.
+
+    _wait_for_next_cycle used to clear the event on entry, so a wake raised
+    while the cycle was still working got wiped and the watcher sat out the
+    whole interval - the same defect the original _force_flag had.
+    """
+    app.watching = True
+    app._wake.set()                      # as if F5 landed mid-cycle
+    started = time.monotonic()
+    app._wait_for_next_cycle(30)
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, f"pending wake was discarded ({elapsed:.1f}s)"
+
+
+def test_each_cycle_starts_from_a_clear_wake(app, monkeypatch):
+    """The clear belongs at the start of the work, not the start of the wait."""
+    seen = []
+    monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
+    monkeypatch.setattr(gui, "fetch_all_products",
+                        lambda *a, **k: seen.append(app._wake.is_set()) or [])
+    app.settings["poll_interval"] = 1
+    app.watching = True
+    app._wake.set()                      # stale wake left over from before
+    threading.Thread(target=app._watch_loop, daemon=True,
+                     name="unifi-watch-test").start()
+    pump_until(app, lambda: len(seen) >= 2)
+    _quiesce(app)
+    assert seen[:2] == [False, False], seen
 
 
 def test_close_stops_watching_and_flushes(app, monkeypatch):

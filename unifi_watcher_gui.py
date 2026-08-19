@@ -1455,6 +1455,11 @@ class UnifiWatcherApp(tk.Tk):
 
     def _watch_loop(self):
         while self.watching:
+            # Consume any pending wake here, at the start of the work, rather
+            # than at the start of the countdown. Clearing it later would
+            # discard a Check Now pressed *during* the fetch - the same defect
+            # the old _force_flag had.
+            self._wake.clear()
             self._post( self._set_status, "Checking…", self.C["yellow"])
             self._post( self._log, "Fetching full store catalog…", "info")
             region = self.settings.get("region", "us")
@@ -1551,8 +1556,11 @@ class UnifiWatcherApp(tk.Tk):
         An Event rather than sleep(1) in a loop: Stop and Check Now used to
         take up to a full second to register, and a force-check raised during
         the fetch itself was cleared before the countdown ever saw it.
+
+        The event is deliberately *not* cleared here - _watch_loop clears it
+        when a cycle begins, so a wake raised while that cycle was running is
+        still honoured when the countdown starts.
         """
-        self._wake.clear()
         deadline = time.monotonic() + interval
         while self.watching:
             remaining = deadline - time.monotonic()
