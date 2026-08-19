@@ -43,15 +43,41 @@ jobs:
           pip install -r requirements.txt
           pip install pytest pyflakes
 
+      - name: Report environment
+        run: |
+          python -VV
+          python -c "import tkinter; print('tkinter Tk', tkinter.TkVersion)" || echo "tkinter unavailable"
+          pip list
+
       - name: Lint
         run: python -m pyflakes *.py tests/*.py
 
-      - name: Test (Windows)
-        if: runner.os == 'Windows'
-        run: python -m pytest tests -q
-
       # Tk needs a display; the GUI tests skip themselves if it is missing,
       # but xvfb lets them actually run on Linux too.
-      - name: Test (Linux)
-        if: runner.os == 'Linux'
-        run: xvfb-run -a python -m pytest tests -q
+      - name: Test
+        run: |
+          set +e
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            xvfb-run -a python -m pytest tests --tb=short > pytest.log 2>&1
+          else
+            python -m pytest tests --tb=short > pytest.log 2>&1
+          fi
+          code=$?
+          cat pytest.log
+          if [ $code -ne 0 ]; then
+            # Job logs need a signed-in session; annotations do not. Surface the
+            # failure summary as one so it is readable from the run page and via
+            # the public checks API.
+            summary=$(sed -n '/short test summary/,$p' pytest.log | head -40)
+            if [ -z "$summary" ]; then summary=$(tail -40 pytest.log); fi
+            encoded=$(printf '%s\n' "$summary" | awk '{printf "%s%%0A", $0}')
+            echo "::error title=pytest failed on ${RUNNER_OS} py${{ matrix.python-version }}::${encoded}"
+          fi
+          exit $code
+
+      - name: Upload pytest log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-${{ matrix.os }}-${{ matrix.python-version }}
+          path: pytest.log

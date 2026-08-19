@@ -15,30 +15,77 @@ from conftest import product
 
 tk = pytest.importorskip("tkinter")
 
+# One Tcl interpreter for the whole module, created once and never destroyed.
+#
+# Creating *and destroying* a Tk root per test progressively breaks Tcl's
+# library-path state: later Tk() calls die with `invalid command name
+# "tcl_findLibrary"` or `Can't find a usable init.tcl`, intermittently, in
+# whichever test happens to be next. Python 3.12 tightened tkinter
+# finalisation, so this only bites on 3.10 and 3.11 - exactly the split seen
+# on CI, where those two jobs failed and 3.12/3.13 passed.
+#
+# Doubling as the availability probe means even the probe does not churn an
+# interpreter.
 try:
-    _probe = tk.Tk()
-    _probe.destroy()
-except Exception:                                     # pragma: no cover
-    pytest.skip("no display available for Tk", allow_module_level=True)
+    _ANCHOR = tk.Tk()
+    _ANCHOR.withdraw()
+except Exception as _e:                               # pragma: no cover
+    pytest.skip(f"Tk unavailable: {_e}", allow_module_level=True)
 
 import unifi_watcher_gui as gui  # noqa: E402
 
 logging.getLogger("unifi_watcher").setLevel(logging.CRITICAL)
 
 
-@pytest.fixture
-def app(isolated_files, monkeypatch):
-    monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
-    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [])
+def _quiesce(a):
+    """Stop the watcher and join its workers."""
+    a.watching = False
+    a._wake.set()
+    for t in threading.enumerate():
+        if t is not threading.current_thread() and t.name.startswith("unifi-"):
+            t.join(timeout=5)
+
+
+@pytest.fixture(scope="module")
+def _session_app():
+    """The single UnifiWatcherApp instance shared by every test in this module."""
     a = gui.UnifiWatcherApp()
     a.withdraw()
     yield a
-    a.watching = False
-    a._wake.set()
+    _quiesce(a)
     try:
         a.destroy()
     except tk.TclError:
         pass
+
+
+@pytest.fixture
+def app(_session_app, isolated_files, monkeypatch):
+    """Hand each test a clean app without building a new Tcl interpreter."""
+    monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [])
+
+    a = _session_app
+    _quiesce(a)
+    a._wake.clear()
+    a.watched = []
+    a.notified = {}
+    a._prev_status = {}
+    a._delisted = set()
+    a._closed = False
+    a.watcher_thread = None
+    a.settings = gui.load_settings()
+    # _on_settings_apply tears down and rebuilds the whole widget tree, which
+    # is exactly the reset we want - and it is production code, so the reset
+    # path is itself covered.
+    a._on_settings_apply(a.settings)
+    a._clear_log()
+    a._clear_changes()
+
+    yield a
+
+    _quiesce(a)
+    a._closed = False
 
 
 def pump(root, seconds=0.3):
@@ -135,11 +182,17 @@ def test_wait_returns_immediately_when_woken(app):
 
 def test_close_stops_watching_and_flushes(app, monkeypatch):
     flushed = []
+    destroyed = []
     monkeypatch.setattr(gui.stock_history, "flush", lambda: flushed.append(1))
+    # The app is shared across this module, so record the teardown rather than
+    # actually destroying the interpreter out from under the other tests.
+    monkeypatch.setattr(type(app), "destroy", lambda self: destroyed.append(1))
     app.watching = True
     app._on_close()
     assert app.watching is False
+    assert app._wake.is_set()
     assert flushed == [1]
+    assert destroyed == [1]
 
 
 # ── delisted items ───────────────────────────────────────────────────────────
@@ -158,7 +211,8 @@ def test_a_delisted_item_is_checked_once(app, monkeypatch):
 
     monkeypatch.setattr(gui, "check_slug", raiser)
     app.watching = True
-    threading.Thread(target=app._watch_loop, daemon=True).start()
+    threading.Thread(target=app._watch_loop, daemon=True,
+                     name="unifi-watch-test").start()
     assert pump_until(app, lambda: "gone" in app._delisted)
     # give the loop room to wrongly re-check across further cycles
     pump(app, 2.5)
@@ -209,8 +263,10 @@ def browse(app, monkeypatch):
     yield d
     try:
         d.destroy()
+        app.update()
     except tk.TclError:
         pass
+
 
 
 def shown(dialog):
