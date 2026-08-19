@@ -511,6 +511,15 @@ class WatchedRow(tk.Frame):
         if sub_parts:
             self.sub.config(text="  ·  ".join(sub_parts))
 
+    def mark_delisted(self):
+        """The store no longer carries this slug; stop implying it is tracked."""
+        C = self.C
+        self.in_stock = None
+        self.dot.config(fg=C["muted"])
+        self.badge.config(text="DELISTED", bg=C["tag_bg"], fg=C["yellow"])
+        self.store_btn.config(bg=C["tag_bg"], fg=C["muted"])
+        self.sub.config(text="No longer listed on the store — remove or re-add it.")
+
 
 # ── Section header ────────────────────────────────────────────────────────────
 
@@ -889,6 +898,7 @@ class UnifiWatcherApp(tk.Tk):
         self._changes_open  = True
         self._force_flag    = False
         self._prev_status   = {}   # slug -> (in_stock, title, price) for full-store diff
+        self._delisted      = set()  # slugs the store no longer carries
 
         self._apply_ttk_styles()
         self._build()
@@ -1193,6 +1203,7 @@ class UnifiWatcherApp(tk.Tk):
         # and stock against EU ones and report the whole store as "changed".
         self._prev_status = {}
         self.notified.clear()
+        self._delisted.clear()      # a slug absent from one store may exist in another
         invalidate_build_id()
         self._log(f"Region {old.upper()} → {new.upper()}: baseline reset.", "warn")
 
@@ -1291,7 +1302,11 @@ class UnifiWatcherApp(tk.Tk):
                     self.after(0, self._on_in_stock, item)
                 elif not in_stock:
                     self.notified[item["slug"]] = False
+            except ProductNotFound:
+                self._delisted.add(item["slug"])
+                self.after(0, self._mark_delisted, item["slug"], item["title"])
             except Exception as e:
+                log.exception("Quick-check failed for %s", item["slug"])
                 self.after(0, self._log, f"Quick-check failed: {e}", "err")
         threading.Thread(target=run, daemon=True).start()
 
@@ -1385,23 +1400,30 @@ class UnifiWatcherApp(tk.Tk):
                 self._prev_status = current_status
 
                 # ── Update watched item rows + notifications ──────────
-                watched_slugs = {w["slug"] for w in self.watched}
                 for item in list(self.watched):
                     if not self.watching:
                         break
                     slug, title = item["slug"], item["title"]
+                    if slug in self._delisted:
+                        continue
                     status_entry = current_status.get(slug)
                     if status_entry:
                         in_stock, _, price = status_entry
                     else:
-                        # Item not in catalog (removed from store?) — try direct
+                        # Not in the catalog: either genuinely delisted, or a
+                        # product the category pages do not carry. Ask directly.
                         try:
                             in_stock, price = check_slug(
                                 build_id, slug, region,
                                 retries=self.settings.get("max_retries", 3))
-                        except Exception as e:
+                        except ProductNotFound:
+                            # Report once, then stop re-checking it every cycle.
+                            self._delisted.add(slug)
+                            self.after(0, self._mark_delisted, slug, title)
+                            continue
+                        except StoreError as e:
                             self.after(0, self._log,
-                                       f"Error checking {title}: {e}", "err")
+                                       f"Could not check {title}: {e}", "err")
                             continue
 
                     stock_history.record_check(slug, title, in_stock, price)
@@ -1424,6 +1446,12 @@ class UnifiWatcherApp(tk.Tk):
                     self.after(0, self.countdown_lbl.config, {"text": f"Next check in {i}s"})
                     time.sleep(1)
                 self.after(0, self.countdown_lbl.config, {"text": ""})
+
+    def _mark_delisted(self, slug, title):
+        row = self.rows.get(slug)
+        if row:
+            row.mark_delisted()
+        self._log(f"{title} is no longer listed on the store — skipping.", "warn")
 
     def _update_row(self, slug, in_stock, checked_at, price=None):
         row = self.rows.get(slug)
