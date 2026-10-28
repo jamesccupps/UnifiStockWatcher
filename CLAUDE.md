@@ -160,9 +160,13 @@ write. Security reports: SECURITY.md (GitHub's private reporting).
   Source: GitHub Actions). The page fetches the latest version from the GitHub API and links
   `releases/latest/download/...`, so a release needs no deploy. `site/images/social-preview.png` (1280x640) is
   also the repository's Settings → Social preview, which the user uploads by hand.
-- **SourceForge** mirrors GitHub, never the other way round: on the SourceForge project, Admin → Files settings →
-  GitHub Integration, with `jamesccupps/UnifiStockWatcher`; new GitHub releases (and their files) are imported
-  automatically. Older releases need the one-time GitHub Importer. The in-app updater only ever reads GitHub.
+- **SourceForge** (`unifi-stock-watcher`) mirrors GitHub's release files, never the other way round:
+  `packaging/sourceforge/README.md` has the setup, the listing text, categories, screenshot captions and the
+  logo. Unlock the project menu (lock icon), gear next to **Files** → **GitHub Integration**, with
+  `jamesccupps/UnifiStockWatcher`: each new release's files are imported after it's published. A release
+  published before that is re-checked when its text is edited on GitHub; files added to a release afterwards are
+  never seen. Choose the new Setup.exe as the Windows default download after each release. The in-app updater
+  only ever reads GitHub.
 - **winget**: `scripts/winget_manifest.py X.Y.Z` writes the three manifest files for `JamesCupps.UnifiStockWatcher`
   (InstallerType inno, Scope user, ProductCode the AppId + `_is1`) into `build/winget/`, from the published
   release's Setup.exe. Validate with `winget validate --manifest <folder>`, then open a PR to microsoft/winget-pkgs
