@@ -1,5 +1,48 @@
 # Changelog
 
+Each release's own notes (what users see on the release page) are in `release-notes/`.
+
+## v3.0.0
+
+### Added
+
+- A new interface on ttk, drawn by the app itself (`theme.py`, `gfx.py`): Windows 11-style light and dark
+  themes following Windows or set by hand, any accent colour (Windows' by default), text size, DPI-correct
+  layout. Replaces 2.x's five presets, eight colour pickers and font list.
+- The notification area (`tray.py`, Shell_NotifyIcon through ctypes): close to tray, an icon showing idle /
+  watching / in stock, a menu, and notifications that open the product when clicked.
+- Start with Windows, single instance (a second launch shows the first), remembered window position.
+- An installer (Inno Setup, per user, no admin) and a portable zip, from a one-folder PyInstaller build with
+  version information; `scripts/build_windows.py`.
+- Signed in-app updates (`updater.py`): an Ed25519-signed `latest.json` per release, verified by a
+  dependency-free `ed25519.py` against the key in `update_key.py`; installed copies run the new installer
+  silently, portable copies swap their program files in place with rollback.
+- The catalog dialog is a Treeview with check boxes and sortable columns; 600 products render in well under a
+  second.
+- History records changes, watched or store-wide, with friendly times, a filter and CSV export.
+- `--self-test` for the frozen build, used by CI on the zip and on the installed copy.
+- `scripts/demo.py`: the app against a pretend store, and the screenshots for the README and the site.
+- A project page on GitHub Pages, SECURITY.md, issue forms, Dependabot, THIRD-PARTY-NOTICES.md, CLAUDE.md and
+  ROADMAP.md. Workflow actions are pinned to commits.
+
+### Changed
+
+- Data lives in `%APPDATA%\UniFi Stock Watcher` (or beside a portable copy); 2.x files are copied there once.
+- Settings are validated on load; an invalid value falls back to its default instead of breaking start-up.
+- Settings apply as they change; there is no Apply button.
+- The history file is version 2: 2.x files are converted (repeated states collapsed, the miscounted
+  "in-stock alerts" dropped).
+- Worker threads never call Tk: results go through a queue the main loop drains.
+- The daily category check runs from every cycle, not only when watching starts.
+
+### Fixed
+
+- Statuses on every card were lost when one item was added or removed.
+- A quick check and a cycle finding the same product in stock at once could alert twice.
+- Imported product ids were not validated before going into store URLs.
+- The 2.x window was laid out in physical pixels, so at 150 % scaling the log and row buttons were cut off;
+  read-only dropdowns were unreadable.
+
 ## v2.1.0
 
 ### Added

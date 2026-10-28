@@ -1,238 +1,177 @@
 # UniFi Stock Watcher
 
-A desktop stock monitoring tool for the [Ubiquiti Store](https://store.ui.com). Tracks product availability across the entire UniFi catalog and alerts you the moment something comes back in stock — with Windows notifications, sound alerts, and automatic browser launch.
-
-Built with Python and tkinter. No API key required — works by polling the public store API.
-
-![Python](https://img.shields.io/badge/python-3.10+-blue)
-![Platform](https://img.shields.io/badge/platform-Windows-lightgrey)
-![License](https://img.shields.io/badge/license-MIT-green)
+[![Latest release](https://img.shields.io/github/v/release/jamesccupps/UnifiStockWatcher?label=release)](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest)
 [![CI](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/ci.yml/badge.svg)](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/ci.yml)
+[![Store contract](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/contract.yml/badge.svg)](https://github.com/jamesccupps/UnifiStockWatcher/actions/workflows/contract.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-## Features
+Tells you the moment something you want is back in stock on the Ubiquiti Store (store.ui.com). Pick the
+products from the live catalog; the app checks the whole store on a timer and alerts you with a notification,
+a sound and the product's page in your browser. It sits in the notification area and can start with Windows.
 
-- **Full-store stock change monitoring** — Every poll cycle fetches the entire UniFi catalog (~490 products) and diffs against the previous snapshot, showing every stock transition across the store in a live feed
-- **Watch list with favourites** — Pick specific out-of-stock items to monitor, star the ones you care about most
-- **Windows notifications + sound alerts** — System tray balloon notifications with optional sound when a watched item comes back in stock
-- **Auto browser launch** — Automatically opens the store page when something you're watching becomes available
-- **Price tracking** — Displays current prices with proper currency formatting (USD, EUR, GBP, CAD)
-- **Self-updating category list** — Follows the store's own redirects and adopts new categories automatically, so a rename or addition on Ubiquiti's side does not silently stop products being watched
-- **Restock estimates** — Shows the store's own restock date and how long an item has been sold out, e.g. `back ~7 Sep  ·  sold out 13 days`, on watched items and in the browse list
-- **Category filtering** — Browse dialog filters by product category (Gateways, Switching, WiFi, Cameras, Door Access, etc.)
-- **Multi-region support** — US, EU, UK, and Canada stores
-- **Configurable poll interval** — 15s to 600s, adjustable from Settings
-- **Stock history tab** — Persistent log of every check with statistics
-- **Export/Import watch lists** — JSON backup and sharing
-- **Per-item quick check** — Check a single product immediately without waiting for the next cycle
-- **Force check (F5)** — Interrupt the countdown and trigger an immediate full poll
-- **Colour themes** — 5 built-in presets (Dark, Midnight Blue, Slate, Light, UniFi Blue) plus full custom colour picker
-- **Customizable typography** — Font family and size settings
-- **Auto-start option** — Begin monitoring immediately on launch
-- **CLI mode** — Headless console watcher for servers or background use
+**[⬇ Download for Windows](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-Setup.exe)**
+(`UnifiStockWatcher-Setup.exe`, Windows 10 or 11, 64-bit) ·
+[Portable zip](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-win64.zip) ·
+[All releases](https://github.com/jamesccupps/UnifiStockWatcher/releases) ·
+[Website](https://jamesccupps.github.io/UnifiStockWatcher/)
 
-## Screenshots
+![The watch list in the dark theme: two favourites (one sold out with a restock estimate, one back in stock with an Open in store button), more sold-out products, and the store-wide changes feed](site/images/watch-list-dark.png)
 
-<img width="2032" height="1163" alt="image" src="https://github.com/user-attachments/assets/1f2d694a-ea53-4c13-887e-32ea800a1be9" />
+<sub>Demo mode: a sample catalog with made-up stock, prices and dates.</sub>
 
-## Installation
+- **The whole store, every check.** Each check reads the full UniFi catalog (about 490 products, 8 requests)
+  whether you watch one product or fifty, and the feed at the bottom shows everything that came into or went out
+  of stock anywhere in the store.
+- **Alerts that reach you.** A notification you can click to open the product, a sound, and the product's page
+  opened in your browser, once each time something comes back. Each one is a switch in Settings.
+- **Restock estimates.** The store's own restock date and how long a product has been sold out, e.g.
+  `back ~7 Nov · sold out 13 days`, on the watch list and in the catalog.
+- **Runs in the background.** Closing the window keeps watching from the notification area. *Start with Windows*
+  starts it there when you sign in.
+- **History.** Every change to the products you watch (or to the whole store), kept between runs, searchable
+  and exportable as CSV.
+- **Signed updates.** It checks GitHub once a day and installs a new version with one click. A download is
+  installed only if it carries the release signature built into the app and matches its signed checksum.
+- **Looks at home on Windows 11.** Light and dark themes that follow Windows, in Windows' accent colour or one
+  of your choosing, at any display scale.
+- **Four stores.** United States, Europe, United Kingdom and Canada.
+- **A command-line watcher** too, for a server or Task Scheduler.
 
-Windows 10/11. Notifications use Windows Forms, so other platforms will run
-but stay silent.
+No account, no API key and nothing to configure: the app reads the store's public catalog, the same data its web
+pages are built from, at a polite interval (every minute by default).
 
-### Quick Start — no Python needed
+## Install
 
-Grab `UnifiStockWatcher.exe` from the [latest release](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest) and double-click it.
+**Installer (recommended):** download
+[`UnifiStockWatcher-Setup.exe`](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-Setup.exe)
+and run it.
 
-It is portable: `watched_items.json`, `settings.json` and `stock_history.json` are kept in the folder you put the executable in, so choose somewhere writable rather than `Program Files`. `UnifiStockWatcher-cli.exe` is the headless watcher, for running under Task Scheduler.
+- It installs for your Windows user only, with no admin prompt, into `%LOCALAPPDATA%\Programs\UniFi Stock Watcher`.
+- It adds a Start menu shortcut (and a desktop one if you tick it) and appears in **Settings → Apps** for
+  uninstalling.
+- The app isn't code-signed, so Windows may show *Windows protected your PC* the first time: click **More info**,
+  then **Run anyway**. Each release lists the SHA-256 of every file in `SHA256SUMS.txt`.
 
-The executables are unsigned, so SmartScreen warns on first run (*More info → Run anyway*), and some antivirus engines flag unsigned PyInstaller builds. Running from source avoids both.
+**Portable:** download
+[`UnifiStockWatcher-win64.zip`](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-win64.zip)
+and unzip it somewhere of your own, e.g. a USB stick or `%LOCALAPPDATA%\Programs`. It keeps its watch list and
+settings in its own folder (that's what the `portable.txt` beside it does), and updates itself in place. Avoid
+`C:\Program Files`, which it can't write to.
 
-### From source
+**From source:** Python 3.10 or newer, then `pip install -r requirements.txt` and `python unifi_watcher_gui.py`
+(or double-click `install_and_run.bat`).
 
-Needs Python 3.10+ ([python.org](https://python.org) — check "Add to PATH"
-during install). CI covers 3.10 through 3.13.
+## Use
 
-1. Download or clone this repo
-2. Double-click `install_and_run.bat`
-3. Choose option 1 to launch the GUI
+1. Click **Add products…**. The store's catalog opens: search it, pick a category, tick the products you want.
+   Sold-out products are shown first; tick **Include products in stock** to see everything.
+2. Click **Start watching**. The first check sets a baseline; every check after that compares the whole store
+   with the one before.
+3. When a product you watch comes back, you get the alert, its card turns green and gets an **Open in store**
+   button.
 
-Or by hand:
+- **★** pins a product to the Favourites at the top. **⋯** on a card (or a right-click) has *Check now*, *Copy link*
+  and *Remove*. Double-click a card to open its page.
+- **Check now** (F5) checks straight away, watching or not. Ctrl+N opens the catalog; Ctrl+1/2/3 switch tabs.
+- The bottom panel has two views: **Store changes** (everything that changed anywhere in the store) and
+  **Activity** (what the watcher did). Drag its top edge to resize it.
+- **History** lists the changes to your watched products, or to the whole store. Double-click a line to open the
+  product; **Export CSV…** saves the lot.
+- **Settings** take effect as you change them: how often to check, the store, the alerts, Start with Windows,
+  the theme and accent colour, text size, and importing or exporting the watch list.
+- The tray icon is grey when idle, blue while watching, and gets a green dot when something you watch is in
+  stock. Click it to open the window; right-click for Start/Stop, Check now and Quit.
 
-```bash
-pip install -r requirements.txt
-python unifi_watcher_gui.py
-```
+## Where it keeps things
 
-### CLI Mode
+- `%APPDATA%\UniFi Stock Watcher\` holds `watched_items.json` (the watch list), `settings.json`,
+  `stock_history.json`, `category_cache.json` and `unifi-stock-watcher.log`. **Settings → About → Open folder**
+  goes there.
+- A portable copy keeps the same files beside `UnifiStockWatcher.exe` instead. Delete `portable.txt` to make it
+  use `%APPDATA%`.
+- Coming from 2.x? Its files were kept beside the program. The first time 3.0 starts, it copies them into
+  `%APPDATA%` (it never moves or overwrites anything). Unzipping the portable 3.0 over a 2.x folder keeps using
+  them in place.
 
-```bash
-python unifi_watcher.py           # Start watching (setup on first run)
-python unifi_watcher.py --setup   # Re-pick watched items
-python unifi_watcher.py --test    # Verify notifications work
-python unifi_watcher.py --version # Print the version and config directory
-```
+## Updates and privacy
 
-## Usage
+The app talks to two places:
 
-### GUI
+- `store.ui.com`, to read the catalog: one check is 8 requests, at the interval you choose (1 minute by default,
+  never faster than 15 seconds). Once a day it also reads the store's home page, to notice new product
+  categories.
+- GitHub, once a day, for this project's `latest.json` (turn it off in **Settings → Updates**). Nothing is
+  downloaded until you click **Install**. Installed copies then run the new installer silently and restart;
+  portable copies swap their program files in place and restart, and put everything back if that fails.
 
-1. Click **"+ Add Items"** to browse the store catalog
-2. Filter by category, search by name, or toggle "Show in-stock" to see everything
-3. Check the items you want to watch and click **"Add to Watch List"**
-4. Star your highest-priority items (they get a dedicated Favourites section)
-5. Click **"▶ Start Watching"** to begin monitoring
+It sends nothing about you, your watch list or your PC anywhere. **Report a problem…** opens a GitHub issue form
+with the version filled in, which you can edit and send yourself.
 
-### Keyboard Shortcuts
+## Command-line watcher
 
-| Key | Action |
-|-----|--------|
-| `F5` | Force immediate check |
-| `Ctrl+N` | Open browse dialog |
-
-### Stock Changes Feed
-
-The **STOCK CHANGES** panel below the watch list shows every stock transition across the *entire* UniFi store — not just your watched items. Green ▲ arrows for items coming back in stock, red ▼ arrows for sellouts.
-
-The first check cycle establishes a baseline. Every cycle after that diffs the full catalog and logs transitions.
-
-### Settings
-
-The Settings tab lets you configure:
-
-- **Poll interval** — How often to check (15–600 seconds)
-- **Sound alerts** — Toggle system sound on in-stock alerts
-- **Auto-open URL** — Toggle automatic browser launch
-- **Auto-start** — Begin watching immediately on launch
-- **Store region** — US, EU, UK, or Canada
-- **Colour theme** — Presets or custom colours
-- **Font** — Family and size
-
-## Project Structure
-
-```
-UnifiStockWatcher/
-├── unifi_core.py          # Shared module: store API, config, notifications, history
-├── _bootstrap.py          # Dependency check, runs before unifi_core is imported
-├── unifi_watcher.py       # CLI watcher (headless console mode)
-├── unifi_watcher_gui.py   # GUI application (tkinter)
-├── tests/                 # pytest suite (offline, no network)
-├── tests_live/            # contract tests against the real store (nightly CI)
-├── UnifiStockWatcher.spec # PyInstaller build for the Windows executables
-├── install_and_run.bat    # Windows launcher with dependency install
-├── launch_gui.bat         # Quick GUI launcher
-├── requirements.txt       # Python dependencies
-├── .github/workflows/     # CI, nightly store contract check, release build
-├── CHANGELOG.md
-├── .gitignore
-├── LICENSE
-└── README.md
-```
-
-### Generated Files (not tracked)
-
-These are created at runtime and excluded via `.gitignore`:
-
-| File | Purpose |
-|------|---------|
-| `watched_items.json` | Your watch list |
-| `settings.json` | GUI settings and preferences |
-| `stock_history.json` | Stock check event log |
-| `category_cache.json` | Discovered store categories, refreshed daily |
-
-## How It Works
-
-The tool uses Ubiquiti's public Next.js store API:
-
-1. Fetches the `buildId` from the store homepage (cached 5 minutes, per region)
-2. Pulls product data from 8 category endpoints via `/_next/data/{buildId}/...`, fetched concurrently over one pooled connection
-3. Parses variant `status` fields (`Available`, `SoldOut`, `ComingSoon`)
-4. Diffs the full catalog against the previous snapshot to detect transitions
-5. Checks watched items against the catalog and fires notifications on availability
-
-Both the GUI and the CLI drive everything from that one catalog fetch, so a cycle costs 8 requests whether you watch 1 item or 50.
-
-Category slugs drift — cameras moved from `all-cameras-nvrs` to `all-physical-security` — so category fetches follow the store's redirects, and once a day the app reads the homepage's category list and adopts any new category that carries products the built-in list misses.
-
-### Single-product lookups
-
-Quick-check, and any watched item the category pages do not carry, go through `check_slug()` instead. That path has to handle a quirk of the store: for roughly half the catalog, `/products/{slug}.json` answers **HTTP 200 with a redirect directive in the body** —
-
-```json
-{"pageProps": {"__N_REDIRECT": "/us/en/category/.../products/ecs-48-poe", "__N_REDIRECT_STATUS": 307}}
-```
-
-— and occasionally a bare `307` carrying `x-nextjs-redirect` rather than `Location`, which `requests` will not follow on its own. The canonical page then contains the product's whole collection plus related and upsell items, so the requested product is resolved by slug, `historicalSlugs`, then `currentProductId`. Anything unresolvable raises `ProductNotFound` rather than reporting a guess.
-
-No authentication, scraping, or rate-limit-busting — just standard JSON endpoints with polite polling intervals.
-
-## Configuration Files
-
-All config files are JSON and stored alongside the script:
-
-**watched_items.json**
-```json
-[
-  {
-    "title": "Switch Pro 24",
-    "slug": "usw-pro-24",
-    "favourite": true,
-    "price": "$379.00",
-    "added_at": "2025-03-17T15:01:00"
-  }
-]
-```
-
-**settings.json**
-```json
-{
-  "poll_interval": 60,
-  "sound_alerts": true,
-  "auto_open_url": true,
-  "auto_start": false,
-  "region": "us",
-  "font_size": 10,
-  "font_family": "Segoe UI",
-  "bg": "#0d1117",
-  "accent": "#1f6feb"
-}
-```
-
-## Notes
-
-- The store's `buildId` rotates periodically. The tool auto-detects this and refreshes with exponential backoff retry. A 404 only discards the cached id if a refetch confirms it actually rotated.
-- Poll interval should be kept at 60s+ to be respectful to Ubiquiti's servers. The default is 60s.
-- Notifications use PowerShell's `System.Windows.Forms.NotifyIcon` — works on all Windows 10/11 systems without extra dependencies. Titles and messages are passed through the environment, never interpolated into the script, so store- or import-supplied text cannot be executed.
-- Imported watch lists are untrusted input: entries are validated, length-bounded, and reduced to known keys before being stored.
-- The full catalog fetch (8 HTTP requests per cycle) is more efficient than individual product checks, and does not grow with the size of your watch list.
-
-## Building the executables
-
-```bash
-pip install pyinstaller
-python -m PyInstaller UnifiStockWatcher.spec --noconfirm --clean
-```
-
-Produces `dist/UnifiStockWatcher.exe` (windowed) and `dist/UnifiStockWatcher-cli.exe` (console). CI builds and attaches both to any `v*` tag.
-
-## Development
-
-```bash
-pip install -r requirements.txt
-pip install pytest
-python -m pytest
-```
-
-The suite is offline — the store is faked with a stub session — so it runs anywhere in about ten seconds. GUI tests skip themselves if Tk has no display. CI runs Windows and Linux across Python 3.10–3.13.
+`UnifiStockWatcher-cli.exe` (next to the app, in either kind of install) or `python unifi_watcher.py`:
 
 ```
-tests/
-├── conftest.py           # stub session, product/page builders, temp-file fixtures
-├── test_store.py         # parsing, redirect handling, buildId cache
-├── test_persistence.py   # atomic + UTF-8 JSON, watch list, history
-├── test_notify.py        # notification text is data, not PowerShell
-└── test_gui.py           # watcher state, browse dialog, widget lifecycle
+UnifiStockWatcher-cli.exe            # watch (picks products the first time)
+UnifiStockWatcher-cli.exe --setup    # pick the products again
+UnifiStockWatcher-cli.exe --test     # check notifications and stock detection
+UnifiStockWatcher-cli.exe --version  # the version, and where the files are
 ```
+
+It uses the same watch list and settings as the app. Run it from Task Scheduler for a watcher without a window.
+
+## Troubleshooting
+
+| What you see | Fix |
+|---|---|
+| No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. |
+| "Couldn't reach the store" | The store or your connection is down; the watcher keeps trying at every interval. |
+| A product shows **DELISTED** | The store doesn't list it any more (renamed or discontinued). Remove it, and add the new one from the catalog. |
+| Stock looks wrong for one product | [Open an issue](https://github.com/jamesccupps/UnifiStockWatcher/issues/new?template=bug_report.yml) with its store link. A nightly check against the real store catches most changes on Ubiquiti's side the day they ship. |
+| The window is gone | It's in the notification area (click the tray icon). Starting the app again also brings it back. |
+| "Windows protected your PC" | **More info → Run anyway**. The app isn't code-signed. |
+| The update didn't install | Details are in `update.log` in the data folder. The previous version keeps running; the release page always has the full installer. |
+
+## Uninstalling
+
+**Settings → Apps → Installed apps → UniFi Stock Watcher → Uninstall** removes the program, its shortcuts and its
+Start with Windows entry. Your watch list and settings stay in `%APPDATA%\UniFi Stock Watcher`; delete that
+folder too if you don't need them. A portable copy: delete its folder.
+
+## How it works
+
+The store is a Next.js site. The app reads its `buildId` from the home page (cached for five minutes, per store),
+then the category pages' data at `/_next/data/{buildId}/{region}/category/....json`, concurrently over one pooled
+connection, and reads each product's variant `status` (`Available`, `SoldOut`, `ComingSoon`), price, and
+`restockEtaAt` / `soldOutAt`. A product the category pages don't carry is looked up by its own page, which for
+about half the catalog answers HTTP 200 with a redirect *in the body* (`__N_REDIRECT`) or a bare 307 with
+`x-nextjs-redirect`; the app follows both and picks the product by slug, `historicalSlugs`, then
+`currentProductId`, and says *delisted* rather than guessing when nothing matches.
+
+Ubiquiti renames categories now and then (cameras moved from `all-cameras-nvrs` to `all-physical-security`), so
+category fetches follow the store's redirects, and once a day the app adopts any new category that carries
+products the built-in list misses. A [nightly job](.github/workflows/contract.yml) checks all of this against the
+real store and opens an issue when it breaks.
+
+## Building and development
+
+```
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest                       # the offline suite (the store is faked), ~15 s
+python -m pytest tests_live            # contract tests against the real store
+python scripts/demo.py                 # the app against a pretend store
+python scripts/build_windows.py        # dist\: the program folder, the zip, and with Inno Setup 6 the installer
+```
+
+CI runs the suite on Windows and Linux for Python 3.10 to 3.14, then builds the Windows release files, runs the
+built app's self-test, and installs, self-tests and uninstalls the installer. A version tag (`v3.0.0`) builds,
+signs and publishes the release. [CLAUDE.md](CLAUDE.md) has the architecture, the release process and what was
+learned along the way; [ROADMAP.md](ROADMAP.md) what's planned.
 
 ## License
 
-MIT License — see [LICENSE](LICENSE) for details.
+MIT: see [LICENSE](LICENSE). The libraries inside the Windows build are listed, with their licenses, in
+[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
+
+UniFi Stock Watcher is an independent project, not made, endorsed or supported by Ubiquiti. UniFi is a trademark
+of Ubiquiti Inc.
