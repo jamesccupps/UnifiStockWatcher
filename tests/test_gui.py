@@ -497,7 +497,9 @@ def browse(app, monkeypatch):
     d = gui.BrowseDialog(app, [{"slug": "oos-c", "title": "Charlie"}], picks.extend)
     d.withdraw()
     d.picks = picks
-    pump_until(app, lambda: d.all_prods and d._filter_job is None)
+    # Until _on_fetched has run on the main loop, not merely until the worker
+    # has the catalog: its own filter pass would land inside the test.
+    pump_until(app, lambda: d.loaded and d._filter_job is None)
     yield d
     try:
         d.destroy()
@@ -597,7 +599,7 @@ def test_browse_renders_a_full_catalog_quickly(app, monkeypatch):
     d = gui.BrowseDialog(app, [], lambda *_: None)
     d.withdraw()
     try:
-        assert pump_until(app, lambda: d.all_prods)
+        assert pump_until(app, lambda: d.loaded)
         started = time.perf_counter()
         d._filter()
         assert len(d.tree.get_children()) == 600

@@ -308,6 +308,7 @@ class BrowseDialog(tk.Toplevel):
         self._filter_job      = None      # pending debounced filter
         self._closed          = False     # guards callbacks from the fetch thread
         self._sort            = ("product", False)
+        self.loaded           = False     # the catalog is in and shown
 
         T = self.T
         self.title("Add products")
@@ -448,6 +449,8 @@ class BrowseDialog(tk.Toplevel):
             log.exception("Browse populate failed")
             self._set_status(f"Error displaying products: {ex}", self.T.c["red"])
             self.prog.pack_forget()
+        finally:
+            self.loaded = True
 
     def _filter_soon(self, delay_ms=180):
         """Coalesce rapid typing into a single filter pass."""

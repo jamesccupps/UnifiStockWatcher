@@ -18,7 +18,6 @@ import logging
 import queue
 import sys
 import threading
-from ctypes import wintypes
 
 import winplatform
 from winplatform import WM_SHOW_WINDOW
@@ -44,6 +43,8 @@ IMAGE_ICON, LR_LOADFROMFILE = 1, 0x10
 SM_CXSMICON, SM_CXICON = 49, 11
 
 if AVAILABLE:
+    from ctypes import wintypes
+
     LRESULT = ctypes.c_ssize_t
     WNDPROC = ctypes.WINFUNCTYPE(LRESULT, wintypes.HWND, wintypes.UINT,
                                  wintypes.WPARAM, wintypes.LPARAM)

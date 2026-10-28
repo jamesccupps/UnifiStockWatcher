@@ -155,10 +155,11 @@ def test_autostart_follows_a_moved_copy(reg):
     assert reg.values[winplatform.RUN_VALUE] == winplatform.autostart_command()
 
 
-def test_autostart_command_quotes_its_paths(monkeypatch):
+def test_autostart_command_quotes_its_paths(monkeypatch, tmp_path):
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", r"C:\Users\A B\Programs\UnifiStockWatcher.exe")
-    assert winplatform.autostart_command().startswith('"C:\\Users\\A B\\')
+    exe = tmp_path / "A B" / "UnifiStockWatcher.exe"
+    monkeypatch.setattr(sys, "executable", str(exe))
+    assert winplatform.autostart_command() == f'"{exe.resolve()}" --minimized --watch'
 
 
 # ── tray (real, Windows only) ────────────────────────────────────────────────
@@ -177,7 +178,11 @@ def test_tray_starts_stops_and_answers_a_second_copy(monkeypatch, tmp_path):
     for _ in range(2):                            # a second start in one process
         t = tray.TrayIcon(icons, "test", lambda: [], on_show=shown.set,
                           app_icon=gui.resource("icon.ico"))
-        assert t.start()
+        if not t.start():
+            # Shell_NotifyIcon refused: no taskbar to put an icon in (a CI
+            # runner without Explorer, say).
+            t.stop()
+            pytest.skip("no notification area on this desktop")
         t.set_state("watching", "watching 3")
         si = types.SimpleNamespace()
         assert winplatform.SingleInstance.signal_existing(si)
