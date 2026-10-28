@@ -1,0 +1,19 @@
+# The workflows' actions are pinned to commits (the version in a comment), and the build tools in
+# requirements-dev.txt to exact versions: Dependabot opens a pull request when a new version comes
+# out. requirements.txt (the app's one dependency) is a range and needs no pull requests.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      actions:
+        patterns: ["*"]
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    groups:
+      build-tools:
+        patterns: ["*"]

@@ -1,3 +1,7 @@
+# Tests on every push to main and every pull request: the offline suite on Windows and Linux
+# across the supported Pythons, then the Windows build users get - the program folder, the zip
+# and the installer (unsigned here) - started in its self-test mode, installed, self-tested and
+# uninstalled. The build is kept as an artifact for a week.
 name: CI
 
 on:
@@ -6,30 +10,37 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   test:
+    name: Test (${{ matrix.os }}, Python ${{ matrix.python-version }})
     strategy:
       fail-fast: false
       matrix:
         os: [windows-latest, ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13"]
+        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
 
     # Windows runners default to PowerShell, which does not expand globs for
     # native commands - `python -m pyflakes *.py` reaches pyflakes as the
-    # literal string and exits 1. Pin bash so every step behaves identically
-    # across the matrix.
+    # literal string and exits 1. Pin bash so every step behaves identically.
     defaults:
       run:
         shell: bash
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
           cache: pip
+          cache-dependency-path: requirements*.txt
 
       - name: Install Tk (Linux)
         if: runner.os == 'Linux'
@@ -40,20 +51,13 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pyflakes
-
-      - name: Report environment
-        run: |
-          python -VV
-          python -c "import tkinter; print('tkinter Tk', tkinter.TkVersion)" || echo "tkinter unavailable"
-          pip list
+          pip install -r requirements.txt pytest pyflakes cryptography
 
       - name: Lint
-        run: python -m pyflakes *.py tests/*.py
+        run: python -m pyflakes *.py scripts/*.py tests/*.py tests_live/*.py
 
-      # Tk needs a display; the GUI tests skip themselves if it is missing,
-      # but xvfb lets them actually run on Linux too.
+      # Tk needs a display; the GUI tests skip themselves without one, and
+      # xvfb lets them run on Linux too.
       - name: Test
         run: |
           set +e
@@ -65,9 +69,7 @@ jobs:
           code=$?
           cat pytest.log
           if [ $code -ne 0 ]; then
-            # Job logs need a signed-in session; annotations do not. Surface the
-            # failure summary as one so it is readable from the run page and via
-            # the public checks API.
+            # Job logs need a signed-in session; annotations do not.
             summary=$(grep -E '^(FAILED|ERROR)' pytest.log | head -30)
             if [ -z "$summary" ]; then summary=$(tail -40 pytest.log); fi
             encoded=$(printf '%s\n' "$summary" | awk '{printf "%s%%0A", $0}')
@@ -77,7 +79,54 @@ jobs:
 
       - name: Upload pytest log
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: pytest-${{ matrix.os }}-${{ matrix.python-version }}
           path: pytest.log
+
+  package:
+    name: Windows build and installer
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements*.txt
+
+      - name: Install dependencies and Inno Setup
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
+
+      - name: Build (unsigned)
+        run: python scripts/build_windows.py
+
+      - name: Self-test the portable build
+        shell: pwsh
+        run: ./scripts/test_portable.ps1
+
+      - name: Install, self-test and uninstall the installer
+        shell: pwsh
+        run: |
+          $v = python -c "import unifi_core; print(unifi_core.__version__)"
+          ./scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version $v
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: UnifiStockWatcher-windows
+          path: |
+            dist/UnifiStockWatcher-Setup.exe
+            dist/UnifiStockWatcher-win64.zip
+            dist/SHA256SUMS.txt
+          retention-days: 7

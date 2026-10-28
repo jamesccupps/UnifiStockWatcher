@@ -1,54 +1,74 @@
 """
-Unifi Stock Watcher — GUI
-Tabs: Watcher | History | Settings
-Features: price tracking, stock history, category filters, sound alerts,
-          configurable poll interval, multi-region, export/import, statistics,
-          auto-start, per-item quick-check, retry with backoff.
+UniFi Stock Watcher - the desktop app.
+
+A watch list of store products, checked against the whole UniFi catalog on a
+timer, with a tray icon, notifications, a history of stock changes, and signed
+in-app updates. The store logic lives in unifi_core; this is the window
+around it. Tabs: Watch list | History | Settings.
+
+    unifi_watcher_gui.py [--minimized] [--watch]
+      --minimized   start in the tray (Start with Windows passes this)
+      --watch       start watching straight away
 """
 
-import sys
-import time
+import csv
 import logging
+import queue
+import sys
 import threading
-import webbrowser
-import ctypes
+import time
 import tkinter as tk
-from tkinter import ttk, messagebox, colorchooser, filedialog
+import webbrowser
+from collections import deque
 from datetime import datetime
+from pathlib import Path
+from tkinter import colorchooser, filedialog, messagebox, ttk
 
-# ── DPI fix (must be before Tk()) ─────────────────────────────────────────────
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+import winplatform
+
+winplatform.enable_dpi_awareness()          # before the first window exists
 
 # ── Dependency bootstrap (must precede the unifi_core import) ─────────────────
-from _bootstrap import ensure_requests, missing_message
+from _bootstrap import ensure_requests, missing_message  # noqa: E402
 
-_HAVE_REQUESTS = ensure_requests()
+_HAVE_REQUESTS = ensure_requests(auto_install=not getattr(sys, "frozen", False))
 
-# ── Core imports ──────────────────────────────────────────────────────────────
-from unifi_core import (
-    __version__, STORE_BASE, STORE_REGIONS, CATEGORIES, CATEGORY_LABELS, DEFAULT_SETTINGS,
+from unifi_core import (  # noqa: E402
+    __version__, APP_NAME, APP_ID, REPO_URL, BASE_DIR, LOG_FILE,
+    STORE_REGIONS, CATEGORY_LABELS,
     ProductNotFound, StoreError,
-    load_settings, save_settings, build_palette,
+    load_settings, save_settings, product_url, store_home,
     get_build_id, invalidate_build_id, fetch_all_products,
-    refresh_category_coverage,
+    refresh_category_coverage, effective_categories,
     is_available, get_price, check_slug,
     describe_restock, describe_sold_out_for, is_coming_soon,
     load_watched, save_watched, stock_history,
-    notify_windows, play_sound,
+    notify_windows, play_sound, migrate_legacy_files, setup_logging,
     export_watchlist, import_watchlist,
 )
+import gfx  # noqa: E402
+import theme as theming  # noqa: E402
+import tray as traymod  # noqa: E402
+import updater  # noqa: E402
 
 log = logging.getLogger("unifi_watcher.gui")
 
+MAX_LOG_LINES = 500
+MAX_CHANGE_LINES = 1000
+UPDATE_RECHECK_MS = 24 * 3600 * 1000
+ISSUE_URL = f"{REPO_URL}/issues/new?template=bug_report.yml&version={__version__}"
+SITE_URL = "https://jamesccupps.github.io/UnifiStockWatcher/"
 
-def store_home(region="us"):
-    return f"{STORE_BASE}/{STORE_REGIONS[region]['path']}"
+INTERVALS = [(15, "15 seconds"), (30, "30 seconds"), (60, "1 minute"),
+             (120, "2 minutes"), (300, "5 minutes"), (600, "10 minutes"),
+             (1800, "30 minutes"), (3600, "1 hour")]
+THEME_NAMES = [("system", "Use Windows setting"), ("light", "Light"), ("dark", "Dark")]
+
+
+def resource(name):
+    """A file from assets/, from source or from inside the frozen build."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base / "assets" / name
 
 
 def restock_note(product):
@@ -69,28 +89,52 @@ def restock_note(product):
     return "  ·  ".join(bits) if bits else None
 
 
-# ── Widget helpers ────────────────────────────────────────────────────────────
+def interval_label(seconds):
+    for s, label in INTERVALS:
+        if s == seconds:
+            return label
+    return f"{seconds} seconds"
 
-def hsep(parent, C, pady=(0, 0)):
-    f = tk.Frame(parent, bg=C["border"], height=1)
-    f.pack(fill="x", pady=pady)
+
+def friendly_time(ts, now=None):
+    """'Today 16:50', 'Yesterday 09:12', '28 Oct 16:50', '28 Oct 2025'."""
+    try:
+        dt = datetime.fromisoformat(str(ts))
+    except ValueError:
+        return str(ts)
+    now = now or datetime.now()
+    days = (now.date() - dt.date()).days
+    hm = dt.strftime("%H:%M")
+    if days == 0:
+        return f"Today  {hm}"
+    if days == 1:
+        return f"Yesterday  {hm}"
+    if dt.year == now.year:
+        return f"{dt.day} {dt.strftime('%b')}  {hm}"
+    return f"{dt.day} {dt.strftime('%b %Y')}"
 
 
-MAX_LOG_LINES = 500
-MAX_CHANGE_LINES = 1000
+def plural(n, word):
+    return f"{n:,} {word}" + ("" if n == 1 else "s")
+
+
+def category_label(cat):
+    return CATEGORY_LABELS.get(cat) or cat.split("/")[-1].replace("-", " ").title()
 
 
 def _trim_text(widget, max_lines):
     """Drop the oldest lines from a Text widget once it exceeds max_lines.
 
-    The activity log appends one line per watched item per cycle and never
-    trimmed, so a watcher left running overnight accumulated tens of
-    thousands of lines and the widget grew steadily slower to redraw.
+    The activity log appends one line per watched item per cycle; untrimmed,
+    a watcher left running overnight accumulated tens of thousands of lines
+    and the widget grew steadily slower to redraw.
     """
     lines = int(widget.index("end-1c").split(".")[0])
     if lines > max_lines:
         widget.delete("1.0", f"{lines - max_lines + 1}.0")
 
+
+# ── Mouse wheel ───────────────────────────────────────────────────────────────
 
 def _wheel_target(widget):
     """The nearest enclosing canvas registered as wheel-scrollable."""
@@ -105,7 +149,7 @@ def _dispatch_wheel(event):
     """Scroll whichever registered canvas is under the pointer."""
     try:
         under = event.widget.winfo_containing(event.x_root, event.y_root)
-    except tk.TclError:
+    except (tk.TclError, KeyError):
         return None
     target = _wheel_target(under)
     if target is None:
@@ -120,18 +164,17 @@ def _dispatch_wheel(event):
 def bind_wheel(canvas, scrollable=None):
     """Let the wheel scroll `canvas` whenever the pointer is anywhere over it.
 
-    Two approaches that do not work, both of which shipped:
+    Two approaches that do not work, both of which shipped in 2.x:
 
     bind_all is application-wide, so the browse dialog's binding replaced the
-    main list's and then outlived its own canvas — every later wheel event
+    main list's and then outlived its own canvas - every later wheel event
     raised "invalid command name" and the watch list stopped scrolling.
 
     Enabling on <Enter> and tearing down on <Leave> is worse: moving the
     pointer onto a child row fires <Leave> on the container, so the binding
-    was removed exactly where the user actually scrolls. Scrolling did
-    nothing at all.
+    was removed exactly where the user actually scrolls.
 
-    Bind on the toplevel instead — a toplevel is in the bindtags of every
+    Bind on the toplevel instead - a toplevel is in the bindtags of every
     widget inside it, so this catches wheel events over any descendant while
     staying scoped to that window. The handler resolves the target from the
     pointer position rather than closing over one canvas, so a destroyed
@@ -144,155 +187,211 @@ def bind_wheel(canvas, scrollable=None):
         top.bind("<MouseWheel>", _dispatch_wheel, add="+")
 
 
-def tooltip(widget, text):
-    """Simple tooltip on hover."""
-    tip = None
-    def show(e):
-        nonlocal tip
-        tip = tk.Toplevel(widget)
-        tip.wm_overrideredirect(True)
-        tip.wm_geometry(f"+{e.x_root+12}+{e.y_root+12}")
-        lbl = tk.Label(tip, text=text, bg="#ffffe0", fg="#333",
-                       font=("Segoe UI", 9), padx=6, pady=3, relief="solid", bd=1)
-        lbl.pack()
-    def hide(e):
-        nonlocal tip
-        if tip:
-            tip.destroy()
-            tip = None
-    widget.bind("<Enter>", show, add="+")
-    widget.bind("<Leave>", hide, add="+")
+# ── Small widgets ─────────────────────────────────────────────────────────────
+
+class Tooltip:
+    """A themed tooltip, shown after the pointer rests on a widget."""
+
+    def __init__(self, widget, text, theme):
+        self.widget, self.text, self.T = widget, text, theme
+        self.tip = self.job = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _):
+        self._hide()
+        self.job = self.widget.after(550, self._show)
+
+    def _show(self):
+        self.job = None
+        try:
+            x = self.widget.winfo_rootx() + self.T.S(4)
+            y = self.widget.winfo_rooty() + self.widget.winfo_height() + self.T.S(6)
+        except tk.TclError:
+            return
+        c = self.T.c
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        self.tip.wm_geometry(f"+{x}+{y}")
+        tk.Label(self.tip, text=self.text, bg=c["surface"], fg=c["text"],
+                 font=self.T.font(-1), padx=self.T.S(8), pady=self.T.S(4),
+                 highlightthickness=1, highlightbackground=c["border"],
+                 justify="left").pack()
+
+    def _hide(self, _=None):
+        if self.job:
+            self.widget.after_cancel(self.job)
+            self.job = None
+        if self.tip:
+            try:
+                self.tip.destroy()
+            except tk.TclError:
+                pass
+            self.tip = None
+
+
+def placeholder(entry, var, text, theme):
+    """Grey hint text in an empty entry, gone as soon as there's text."""
+    lbl = ttk.Label(entry, text=text, style="Placeholder.TLabel", cursor="xterm")
+    lbl.bind("<Button-1>", lambda _: entry.focus_set())
+
+    def update(*_):
+        if var.get():
+            lbl.place_forget()
+        else:
+            lbl.place(x=theme.S(11), rely=0.5, anchor="w")
+    var.trace_add("write", update)
+    update()
+    return lbl
+
+
+class ScrollFrame(ttk.Frame):
+    """A vertically scrolling area; `inner` is where the content goes. The
+    scroll bar only shows when there is something to scroll."""
+
+    def __init__(self, parent, theme, surface="bg", **kw):
+        super().__init__(parent, style="Card.TFrame" if surface == "surface" else "TFrame", **kw)
+        bg = theme.c["surface" if surface == "surface" else "bg"]
+        self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
+        self.sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview,
+                                style=("Card." if surface == "surface" else "") + "Vertical.TScrollbar")
+        self.canvas.configure(yscrollcommand=self.sb.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = ttk.Frame(self.canvas, style="Card.TFrame" if surface == "surface" else "TFrame")
+        self._win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>", self._on_inner)
+        self.canvas.bind("<Configure>", self._on_canvas)
+        bind_wheel(self.canvas, self.inner)
+        self._sb_shown = False
+
+    def _on_inner(self, _=None):
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._autohide()
+
+    def _on_canvas(self, e):
+        self.canvas.itemconfig(self._win, width=e.width)
+        self._autohide()
+
+    def _autohide(self):
+        need = self.inner.winfo_reqheight() > self.canvas.winfo_height() + 1
+        if need and not self._sb_shown:
+            self.sb.pack(side="right", fill="y", before=self.canvas)
+            self._sb_shown = True
+        elif not need and self._sb_shown:
+            self.sb.pack_forget()
+            self.canvas.yview_moveto(0)
+            self._sb_shown = False
 
 
 # ── Browse dialog ─────────────────────────────────────────────────────────────
 
 class BrowseDialog(tk.Toplevel):
-    def __init__(self, parent, already_watching, on_add, C, settings):
-        super().__init__(parent)
+    """Pick products from the live catalog to add to the watch list.
+
+    A Treeview rather than a widget per product: 2.x built ~490 rows of
+    Frames, Checkbuttons and Labels, and even with pooling a filter pass cost
+    ~100 ms. The first column's image is the row's check box.
+    """
+
+    COLUMNS = (("product", "Product", 330), ("category", "Category", 170),
+               ("price", "Price", 90), ("status", "Status", 200))
+
+    def __init__(self, app, already_watching, on_add):
+        super().__init__(app)
+        self.app, self.T = app, app.theme
         self.on_add           = on_add
         self.already_watching = {w["slug"] for w in already_watching}
-        self.C                = C
-        self.settings         = settings
         self.all_prods        = []
         self.filtered         = []
-        self.check_vars       = {}
-        self._row_pool        = []      # reused row widgets, see _rebuild
-        self._filter_job      = None    # pending debounced filter
-        self._closed          = False   # guards callbacks from the fetch thread
+        self.selected         = set()     # slugs ticked, kept across filters
+        self._filter_job      = None      # pending debounced filter
+        self._closed          = False     # guards callbacks from the fetch thread
+        self._sort            = ("product", False)
 
-        self.title("Add Items to Watch List")
-        self.configure(bg=C["bg"])
-        self.geometry("760x660")
-        self.resizable(True, True)
-        self.transient(parent)
-        self.grab_set()
+        T = self.T
+        self.title("Add products")
+        self.geometry(f"{T.S(900)}x{T.S(640)}")
+        self.minsize(T.S(620), T.S(420))
+        self.transient(app)
+        T.style_window(self)
         self._build()
+        try:
+            self.grab_set()
+        except tk.TclError:
+            pass                      # not viewable yet; modality is a nicety
+        self.bind("<Escape>", lambda _: self.destroy())
         self._fetch()
 
-    def F(self, size_delta=0, bold=False):
-        return (self.settings["font_family"],
-                self.settings["font_size"] + size_delta,
-                "bold" if bold else "normal")
-
     def _build(self):
-        C = self.C
-        # Header
-        hdr = tk.Frame(self, bg=C["panel"], pady=14)
+        T, S = self.T, self.T.S
+        outer = ttk.Frame(self, padding=(S(20), S(16), S(20), S(16)))
+        outer.pack(fill="both", expand=True)
+
+        hdr = ttk.Frame(outer)
         hdr.pack(fill="x")
-        tk.Label(hdr, text="Browse Products",
-                 bg=C["panel"], fg=C["text"], font=self.F(3, True)).pack(
-                     side="left", padx=20)
-        self.status_lbl = tk.Label(hdr, text="Fetching…",
-                                   bg=C["panel"], fg=C["muted"], font=self.F(-1))
-        self.status_lbl.pack(side="right", padx=20)
+        ttk.Label(hdr, text="Add products", style="Title.TLabel").pack(side="left")
+        self.status_lbl = ttk.Label(hdr, text="Fetching…", style="Muted.TLabel")
+        self.status_lbl.pack(side="right")
 
-        # Progress bar
         self.prog_var = tk.IntVar()
-        style = ttk.Style()
-        style.configure("D.Horizontal.TProgressbar",
-                        background=C["accent"], troughcolor=C["panel"])
-        self.prog = ttk.Progressbar(self, variable=self.prog_var, maximum=100,
-                                    style="D.Horizontal.TProgressbar")
-        self.prog.pack(fill="x")
+        self.prog = ttk.Progressbar(outer, variable=self.prog_var, maximum=100)
+        self.prog.pack(fill="x", pady=(S(10), 0))
 
-        # Filter toolbar
-        bar = tk.Frame(self, bg=C["bg"], pady=8, padx=16)
-        bar.pack(fill="x")
-
-        # Category filter
-        tk.Label(bar, text="Category:", bg=C["bg"], fg=C["muted"],
-                 font=self.F(-1)).pack(side="left", padx=(0, 4))
-        self._cat_var = tk.StringVar(value="All")
-        cat_names = ["All"] + [CATEGORY_LABELS.get(c, c) for c in CATEGORIES]
-        cat_menu = ttk.Combobox(bar, textvariable=self._cat_var,
-                                values=cat_names, width=18, state="readonly")
-        cat_menu.pack(side="left", padx=(0, 12))
-        cat_menu.bind("<<ComboboxSelected>>", lambda _: self._filter())
-
-        # Show in-stock toggle
-        self._stock_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="Show in-stock", variable=self._stock_var,
-                       command=self._filter,
-                       bg=C["bg"], fg=C["muted"], selectcolor=C["panel"],
-                       activebackground=C["bg"], activeforeground=C["text"],
-                       font=self.F(-1), bd=0, highlightthickness=0,
-                       cursor="hand2").pack(side="left", padx=(0, 12))
-
-        # Select all
-        self.all_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(bar, text="Select all", variable=self.all_var,
-                       command=self._toggle_all,
-                       bg=C["bg"], fg=C["muted"], selectcolor=C["panel"],
-                       activebackground=C["bg"], activeforeground=C["text"],
-                       font=self.F(-1), bd=0, highlightthickness=0,
-                       cursor="hand2").pack(side="left", padx=(0, 12))
-
-        # Search
-        tk.Label(bar, text="Search:", bg=C["bg"], fg=C["muted"],
-                 font=self.F(-1)).pack(side="left")
+        bar = ttk.Frame(outer)
+        bar.pack(fill="x", pady=(S(12), S(10)))
         self.q = tk.StringVar()
         self.q.trace_add("write", lambda *_: self._filter_soon())
-        e = tk.Entry(bar, textvariable=self.q, bg=C["panel"], fg=C["text"],
-                     insertbackground=C["text"], relief="flat",
-                     font=self.F(), bd=0)
-        e.pack(side="left", fill="x", expand=True, padx=8, ipady=6)
-        e.focus_set()
+        self.search = ttk.Entry(bar, textvariable=self.q, width=34)
+        self.search.pack(side="left")
+        placeholder(self.search, self.q, "Search products", T)
+        self._cat_var = tk.StringVar(value="All categories")
+        self._cat_keys = {"All categories": None}
+        for cat in effective_categories(self.app.settings.get("region", "us")):
+            self._cat_keys[category_label(cat)] = cat
+        cat_menu = ttk.Combobox(bar, textvariable=self._cat_var, state="readonly",
+                                values=list(self._cat_keys), width=26)
+        cat_menu.pack(side="left", padx=(S(8), S(12)))
+        cat_menu.bind("<<ComboboxSelected>>", lambda _: self._filter())
+        self._stock_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar, text="  Include products in stock", variable=self._stock_var,
+                        command=self._filter).pack(side="left")
+        self.search.focus_set()
 
-        hsep(self, C)
-
-        # Scrollable checkbox list
-        wrap = tk.Frame(self, bg=C["bg"])
-        wrap.pack(fill="both", expand=True)
-        self.cv = tk.Canvas(wrap, bg=C["bg"], highlightthickness=0, bd=0)
-        sb = tk.Scrollbar(wrap, orient="vertical", command=self.cv.yview,
-                          bg=C["panel"], troughcolor=C["bg"], relief="flat", width=10)
-        self.cv.configure(yscrollcommand=sb.set)
+        card = ttk.Frame(outer, style="Tile.TFrame", padding=S(1))
+        card.pack(fill="both", expand=True)
+        inner = ttk.Frame(card, style="Card.TFrame", padding=(S(4), S(4)))
+        inner.pack(fill="both", expand=True, padx=S(2), pady=S(2))
+        self.tree = ttk.Treeview(inner, columns=[c[0] for c in self.COLUMNS],
+                                 show="tree headings", selectmode="browse")
+        self.tree.column("#0", width=S(40), minwidth=S(40), stretch=False, anchor="center")
+        for key, label, width in self.COLUMNS:
+            self.tree.heading(key, text=label, anchor="w",
+                              command=lambda k=key: self._sort_by(k))
+            self.tree.column(key, width=S(width), minwidth=S(60), anchor="w",
+                             stretch=key == "product")
+        c = T.c
+        self.tree.tag_configure("watching", foreground=c["text3"])
+        self.tree.tag_configure("instock", foreground=c["green"])
+        sb = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview,
+                           style="Card.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
-        self.cv.pack(side="left", fill="both", expand=True)
-        self.cb_frame = tk.Frame(self.cv, bg=C["bg"])
-        self._cw = self.cv.create_window((0, 0), window=self.cb_frame, anchor="nw")
-        self.cb_frame.bind("<Configure>",
-            lambda e: self.cv.configure(scrollregion=self.cv.bbox("all")))
-        self.cv.bind("<Configure>",
-            lambda e: self.cv.itemconfig(self._cw, width=e.width))
-        bind_wheel(self.cv, self.cb_frame)
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Button-1>", self._on_click)
+        self.tree.bind("<space>", self._on_space)
+        self.tree.bind("<Return>", lambda _: self._confirm())
 
-        hsep(self, C)
-
-        # Footer
-        foot = tk.Frame(self, bg=C["panel"], pady=10, padx=16)
-        foot.pack(fill="x")
-        self.sel_lbl = tk.Label(foot, text="0 selected",
-                                bg=C["panel"], fg=C["muted"], font=self.F(-1))
+        foot = ttk.Frame(outer)
+        foot.pack(fill="x", pady=(S(14), 0))
+        self.sel_lbl = ttk.Label(foot, text="Tick the products to watch.", style="Muted.TLabel")
         self.sel_lbl.pack(side="left")
-        tk.Button(foot, text="Cancel", command=self.destroy,
-                  bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                  cursor="hand2", font=self.F(),
-                  padx=14, pady=7).pack(side="right", padx=(6, 0))
-        tk.Button(foot, text="Add to Watch List", command=self._confirm,
-                  bg=C["accent"], fg=C["white"], relief="flat", bd=0,
-                  cursor="hand2", font=self.F(0, True),
-                  padx=14, pady=7).pack(side="right")
+        self.all_btn = ttk.Button(foot, text="Select all shown", command=self._toggle_all)
+        self.all_btn.pack(side="left", padx=(S(12), 0))
+        self.add_btn = ttk.Button(foot, text="Add to watch list", style="Accent.TButton",
+                                  command=self._confirm, state="disabled")
+        self.add_btn.pack(side="right")
+        ttk.Button(foot, text="Cancel", command=self.destroy).pack(side="right", padx=(0, S(8)))
 
     def destroy(self):
         self._closed = True
@@ -305,59 +404,49 @@ class BrowseDialog(tk.Toplevel):
         to leave it calling after() on a destroyed widget, which raises out of
         a thread with nowhere to report it.
         """
-        if self._closed:
-            return
-        try:
-            self.after(0, fn, *args)
-        except (tk.TclError, RuntimeError):
-            self._closed = True
+        if not self._closed:
+            self.app._post(lambda: None if self._closed else fn(*args))
 
     def _set_status(self, text, colour=None):
-        self.status_lbl.config(text=text, fg=colour or self.C["muted"])
+        self.status_lbl.config(text=text, foreground=colour or self.T.c["text2"])
 
     def _fetch(self):
         def _progress(pct):
             self.prog_var.set(pct)
-            self.status_lbl.config(text=f"Fetching… {pct}%")
+            self._set_status(f"Fetching… {pct}%")
 
         def run():
             try:
-                region = self.settings.get("region", "us")
+                region = self.app.settings.get("region", "us")
                 self._post(self._set_status,
-                           f"Connecting to store ({region.upper()})…")
+                           f"Connecting to the {STORE_REGIONS[region]['label']} store…")
                 bid = get_build_id(region)
                 self._post(self._set_status, "Fetching products…")
                 all_ = fetch_all_products(
                     bid, region,
                     progress_cb=lambda p: self._post(_progress, p))
-                self.all_prods = sorted(all_, key=lambda p: p.get("title", ""))
+                self.all_prods = sorted(all_, key=lambda p: p.get("title", "").lower())
                 self._post(self._on_fetched)
             except Exception as ex:
                 # Bind the message now. `ex` is unbound the moment this block
                 # exits, so a deferred lambda closing over it raises NameError
-                # inside the Tk callback and the dialog sits on
-                # "Fetching products…" forever with the real cause invisible.
+                # inside the Tk callback and the dialog sits on "Fetching…".
                 self._post(self._on_fetch_failed, f"{type(ex).__name__}: {ex}")
                 log.exception("Browse fetch failed")
         threading.Thread(target=run, daemon=True,
                          name="unifi-browse-fetch").start()
 
     def _on_fetch_failed(self, msg):
-        self.status_lbl.config(text=f"Error: {msg}", fg=self.C["red"])
+        self._set_status(f"Couldn't reach the store: {msg}", self.T.c["red"])
         self.prog.pack_forget()
 
     def _on_fetched(self):
         try:
             self._filter()
-            n_oos = sum(1 for p in self.all_prods if not is_available(p))
-            self.status_lbl.config(
-                text=f"{len(self.all_prods)} products ({n_oos} out of stock)",
-                fg=self.C["muted"])
             self.prog.pack_forget()
         except Exception as ex:
             log.exception("Browse populate failed")
-            self.status_lbl.config(
-                text=f"Error displaying products: {ex}", fg=self.C["red"])
+            self._set_status(f"Error displaying products: {ex}", self.T.c["red"])
             self.prog.pack_forget()
 
     def _filter_soon(self, delay_ms=180):
@@ -368,993 +457,1018 @@ class BrowseDialog(tk.Toplevel):
 
     def _filter(self):
         self._filter_job = None
-        q = self.q.get().lower()
+        q = self.q.get().lower().strip()
         show_all = self._stock_var.get()
-        cat_sel  = self._cat_var.get()
+        cat_key = self._cat_keys.get(self._cat_var.get())
+        self.filtered = [
+            p for p in self.all_prods
+            if (show_all or not is_available(p))
+            and (not q or q in p.get("title", "").lower())
+            and (not cat_key or p.get("_category") == cat_key)]
+        self._apply_sort()
+        self._render()
+        n_oos = sum(1 for p in self.all_prods if not is_available(p))
+        self._set_status(f"{len(self.filtered)} shown  ·  {len(self.all_prods)} products, "
+                         f"{n_oos} out of stock")
 
-        cat_key = None
-        if cat_sel != "All":
-            for k, v in CATEGORY_LABELS.items():
-                if v == cat_sel:
-                    cat_key = k
-                    break
+    def _status_text(self, p):
+        if p["slug"] in self.already_watching:
+            return "On your watch list"
+        if is_available(p):
+            return "In stock"
+        note = restock_note(p)
+        if not note:
+            return "Sold out"
+        if note.startswith(("coming soon", "sold out")):
+            return note[0].upper() + note[1:]
+        return f"Sold out  ·  {note}"
 
-        self.filtered = []
-        for p in self.all_prods:
-            if not show_all and is_available(p):
-                continue
-            if q and q not in p.get("title", "").lower():
-                continue
-            if cat_key and p.get("_category") != cat_key:
-                continue
-            self.filtered.append(p)
-        self._rebuild()
-        self.status_lbl.config(
-            text=f"{len(self.filtered)} item(s)", fg=self.C["muted"])
+    def _sort_by(self, key):
+        col, desc = self._sort
+        self._sort = (key, not desc if col == key else False)
+        self._apply_sort()
+        self._render()
 
-    def _make_row(self):
-        """Create one reusable row. Rows are configured, never rebuilt."""
-        C = self.C
-        row = tk.Frame(self.cb_frame, bg=C["bg"])
-        cb = tk.Checkbutton(
-            row, command=self._count,
-            bg=C["bg"], selectcolor=C["panel"],
-            activebackground=C["hover"], activeforeground=C["text"],
-            font=self.F(), bd=0, highlightthickness=0, anchor="w")
-        cb.pack(side="left", fill="x", expand=True)
-        price_lbl = tk.Label(row, bg=C["bg"], fg=C["muted"], font=self.F(-1))
-        stock_lbl = tk.Label(row, text="IN STOCK", bg="#1a3a2a", fg=C["green"],
-                             font=self.F(-2, True), padx=5, pady=1)
-        note_lbl = tk.Label(row, bg=C["bg"], fg=C["yellow"], font=self.F(-2))
+    def _apply_sort(self):
+        key, desc = self._sort
+        getters = {
+            "product":  lambda p: p.get("title", "").lower(),
+            "category": lambda p: category_label(p.get("_category", "")),
+            "price":    lambda p: _price_value(p),
+            "status":   lambda p: (is_available(p), self._status_text(p)),
+        }
+        self.filtered.sort(key=getters[key], reverse=desc)
 
-        def enter(_, r=row):
-            if r._hover_enabled:
-                r.config(bg=C["hover"])
-
-        def leave(_, r=row):
-            r.config(bg=C["bg"])
-
-        row._hover_enabled = True
-        row.bind("<Enter>", enter)
-        row.bind("<Leave>", leave)
-        cb.bind("<Enter>", enter)
-        cb.bind("<Leave>", leave)
-        return {"frame": row, "cb": cb, "price": price_lbl,
-                "stock": stock_lbl, "note": note_lbl}
-
-    def _rebuild(self):
-        """Render self.filtered by reconfiguring pooled rows.
-
-        Previously every filter keystroke destroyed all rows and built new
-        ones - 421 Frames, Checkbuttons and Labels - which cost ~1.25s for the
-        full catalog and made the search box lag by ~220ms per character.
-        Widget creation is the expensive part; reconfiguring is not.
-        """
-        C = self.C
-        while len(self._row_pool) < len(self.filtered):
-            self._row_pool.append(self._make_row())
-
-        for row, p in zip(self._row_pool, self.filtered):
-            slug  = p["slug"]
-            title = p.get("title", slug)
-            price = get_price(p) or ""
-            avail = is_available(p)
-            already = slug in self.already_watching
-            if slug not in self.check_vars:
-                self.check_vars[slug] = tk.BooleanVar(value=False)
-
-            row["frame"]._hover_enabled = not already
-            row["frame"].config(bg=C["bg"])
-            row["cb"].config(
-                text=f"  {title}" + (" (watching)" if already else ""),
-                variable=self.check_vars[slug],
-                fg=C["muted"] if already else (C["green"] if avail else C["text"]),
-                cursor="arrow" if already else "hand2",
-                state="disabled" if already else "normal")
-
-            # side="right" packs outward-in, so re-pack stock before price to
-            # keep the badge left of the price the way it renders initially.
-            row["price"].pack_forget()
-            row["stock"].pack_forget()
-            row["note"].pack_forget()
-            if price:
-                row["price"].config(text=price)
-                row["price"].pack(side="right", padx=(0, 8))
-            if avail:
-                row["stock"].pack(side="right", padx=(0, 4))
-            else:
-                note = restock_note(p)
-                if note:
-                    row["note"].config(text=note)
-                    row["note"].pack(side="right", padx=(0, 10))
-
-            # winfo_manager(), not winfo_ismapped(): a row inside a Toplevel
-            # that has not been mapped yet reports ismapped False even when it
-            # is packed, and re-packing moves it to the end of the pack order.
-            if not row["frame"].winfo_manager():
-                row["frame"].pack(fill="x", padx=8, pady=1)
-
-        for row in self._row_pool[len(self.filtered):]:
-            if row["frame"].winfo_manager():
-                row["frame"].pack_forget()
-
-    def _toggle_all(self):
-        v = self.all_var.get()
+    def _render(self):
+        tree, T = self.tree, self.T
+        tree.delete(*tree.get_children())
         for p in self.filtered:
-            if p["slug"] not in self.already_watching:
-                self.check_vars.setdefault(p["slug"], tk.BooleanVar()).set(v)
+            slug = p["slug"]
+            watching = slug in self.already_watching
+            if watching:
+                img, tags = T.image("check_on_disabled"), ("watching",)
+            else:
+                img = T.image("check_on" if slug in self.selected else "check_off")
+                tags = ("instock",) if is_available(p) else ()
+            tree.insert("", "end", iid=slug, image=img, tags=tags, values=(
+                p.get("title", slug), category_label(p.get("_category", "")),
+                get_price(p) or "", self._status_text(p)))
         self._count()
 
+    def _toggle(self, slug):
+        if slug in self.already_watching or not self.tree.exists(slug):
+            return
+        if slug in self.selected:
+            self.selected.discard(slug)
+        else:
+            self.selected.add(slug)
+        self.tree.item(slug, image=self.T.image("check_on" if slug in self.selected else "check_off"))
+        self._count()
+
+    def _on_click(self, event):
+        if self.tree.identify_region(event.x, event.y) == "heading":
+            return None
+        row = self.tree.identify_row(event.y)
+        if row:
+            self.tree.focus(row)
+            self.tree.selection_set(row)
+            self._toggle(row)
+            return "break"
+        return None
+
+    def _on_space(self, _):
+        row = self.tree.focus()
+        if row:
+            self._toggle(row)
+        return "break"
+
+    def _toggle_all(self):
+        shown = [p["slug"] for p in self.filtered if p["slug"] not in self.already_watching]
+        if shown and all(s in self.selected for s in shown):
+            self.selected.difference_update(shown)
+        else:
+            self.selected.update(shown)
+        self._render()
+
     def _count(self):
-        n = sum(1 for v in self.check_vars.values() if v.get())
-        self.sel_lbl.config(text=f"{n} selected")
+        n = len(self.selected)
+        self.sel_lbl.config(text=f"{n} selected" if n else "Tick the products to watch.")
+        self.add_btn.config(state="normal" if n else "disabled",
+                            text=f"Add {n} to watch list" if n > 1 else "Add to watch list")
 
     def _confirm(self):
         picks = []
         for p in self.all_prods:
-            if (self.check_vars.get(p["slug"], tk.BooleanVar()).get()
-                    and p["slug"] not in self.already_watching):
+            if p["slug"] in self.selected and p["slug"] not in self.already_watching:
                 picks.append({
                     "title":     p.get("title", p["slug"]),
                     "slug":      p["slug"],
                     "favourite": False,
                     "price":     get_price(p),
-                    "added_at":  datetime.now().isoformat(),
+                    "added_at":  datetime.now().isoformat(timespec="seconds"),
                 })
         if not picks:
             messagebox.showwarning("Nothing selected",
-                                   "Check at least one item.", parent=self)
+                                   "Tick at least one product.", parent=self)
             return
         self.on_add(picks)
         self.destroy()
 
 
+def _price_value(p):
+    for v in p.get("variants", []):
+        price = v.get("displayPrice") or v.get("price")
+        if isinstance(price, dict) and price.get("amount"):
+            return price["amount"]
+        if isinstance(price, (int, float)) and price:
+            return price * 100
+    return float("inf")
+
+
 # ── Watched item row ──────────────────────────────────────────────────────────
 
-class WatchedRow(tk.Frame):
-    def __init__(self, parent, item, on_remove, on_toggle_fav, on_quick_check, C, settings):
-        bg = C["fav_bg"] if item.get("favourite") else C["panel"]
-        super().__init__(parent, bg=bg, pady=8, padx=12,
-                         highlightbackground=C["border"], highlightthickness=1)
-        self.item            = item
-        self.on_remove       = on_remove
-        self.on_toggle_fav   = on_toggle_fav
-        self.on_quick_check  = on_quick_check
-        self.C               = C
-        self.settings        = settings
-        self.in_stock        = None
-        self._build()
+class WatchedRow(ttk.Frame):
+    """One watched product, as a card: favourite star, name and status line,
+    price, a status pill, and (when it's in stock) a button to the store."""
 
-    def F(self, delta=0, bold=False):
-        return (self.settings["font_family"],
-                self.settings["font_size"] + delta,
-                "bold" if bold else "normal")
+    def __init__(self, parent, app, item):
+        T = app.theme
+        S = T.S
+        super().__init__(parent, style="Tile.TFrame",
+                         padding=(S(6), S(8), S(10), S(8)))
+        self.app, self.T, self.item = app, T, item
+        self.in_stock = None
+        self.columnconfigure(1, weight=1)
+        fav = bool(item.get("favourite"))
+        self.star = ttk.Button(
+            self, text=T.icon("star_fill" if fav else "star"),
+            style="Card.Fav.Icon.Subtle.TButton" if fav else "Card.Star.Icon.Subtle.TButton",
+            command=lambda: app._toggle_fav(self.item), takefocus=False)
+        self.star.grid(row=0, column=0, rowspan=2, padx=(0, S(6)))
+        Tooltip(self.star, "Remove from favourites" if fav else
+                "Add to favourites (shown first)", T)
+        self.title_lbl = ttk.Label(self, text=item["title"], style="Card.Strong.TLabel",
+                                   cursor="hand2")
+        self.title_lbl.grid(row=0, column=1, sticky="sw")
+        self.sub = ttk.Label(self, text="Not checked yet", style="Card.Faint.TLabel")
+        self.sub.grid(row=1, column=1, sticky="nw")
+        self.price_lbl = ttk.Label(self, text=item.get("price") or "", style="Card.Muted.TLabel",
+                                   width=10, anchor="e")
+        self.price_lbl.grid(row=0, column=2, rowspan=2, padx=(S(10), S(12)))
+        self.pill = ttk.Label(self, text="NOT CHECKED", style="Neutral.Pill.TLabel")
+        self.pill.grid(row=0, column=3, rowspan=2, padx=(0, S(8)))
+        self.open_btn = ttk.Button(self, text="Open in store", style="Card.Accent.TButton",
+                                   command=self._open, takefocus=False)
+        self.more = ttk.Button(self, text=T.icon("more"), style="Card.Icon.Subtle.TButton",
+                               command=self._menu_at_button, takefocus=False)
+        self.more.grid(row=0, column=5, rowspan=2)
+        Tooltip(self.more, "More", T)
+        for w in (self, self.title_lbl, self.sub, self.price_lbl, self.pill):
+            w.bind("<Button-3>", self._context)
+            w.bind("<Double-Button-1>", lambda _: self._open())
+        self.title_lbl.bind("<Button-1>", lambda _: self._open())
 
-    def _build(self):
-        C  = self.C
-        bg = self.cget("bg")
-        is_fav = self.item.get("favourite", False)
-        region = self.settings.get("region", "us")
+    def _open(self):
+        webbrowser.open(product_url(self.item["slug"], self.app.settings.get("region", "us")))
 
-        # Star
-        self.star = tk.Label(self, text="★" if is_fav else "☆",
-                             bg=bg, fg=C["gold"] if is_fav else C["muted"],
-                             font=self.F(3), cursor="hand2")
-        self.star.pack(side="left", padx=(0, 8))
-        self.star.bind("<Button-1>", lambda _: self.on_toggle_fav(self.item))
-        self.star.bind("<Enter>", lambda _: self.star.config(fg=C["gold"]))
-        self.star.bind("<Leave>", lambda _: self.star.config(
-            fg=C["gold"] if self.item.get("favourite") else C["muted"]))
-        tooltip(self.star, "Toggle favourite")
+    def _menu(self):
+        app, item = self.app, self.item
+        m = tk.Menu(self, tearoff=0, **self.T.menu_colours())
+        m.add_command(label="Check now", command=lambda: app._quick_check_item(item))
+        m.add_command(label="Open in store", command=self._open)
+        m.add_command(label="Copy link", command=lambda: app._copy(
+            product_url(item["slug"], app.settings.get("region", "us"))))
+        m.add_separator()
+        m.add_command(label="Remove from favourites" if item.get("favourite") else "Add to favourites",
+                      command=lambda: app._toggle_fav(item))
+        m.add_command(label="Remove from watch list", command=lambda: app._remove_item(item))
+        return m
 
-        # Status dot
-        self.dot = tk.Label(self, text="●", bg=bg, fg=C["muted"], font=self.F(2))
-        self.dot.pack(side="left", padx=(0, 8))
+    def _menu_at_button(self):
+        m = self._menu()
+        try:
+            m.tk_popup(self.more.winfo_rootx(),
+                       self.more.winfo_rooty() + self.more.winfo_height())
+        finally:
+            m.grab_release()
 
-        # Title + subtitle + price
-        info = tk.Frame(self, bg=bg)
-        info.pack(side="left", fill="x", expand=True)
-        title_row = tk.Frame(info, bg=bg)
-        title_row.pack(fill="x")
-
-        self.title_lbl = tk.Label(title_row, text=self.item["title"],
-                                  bg=bg, fg=C["text"], font=self.F(0, True),
-                                  anchor="w", cursor="hand2")
-        self.title_lbl.pack(side="left")
-        self.title_lbl.bind("<Button-1>",
-            lambda _: webbrowser.open(
-                f"{store_home(region)}/products/{self.item['slug']}"))
-        self.title_lbl.bind("<Enter>",
-            lambda _: self.title_lbl.config(fg=C["accent_h"]))
-        self.title_lbl.bind("<Leave>",
-            lambda _: self.title_lbl.config(fg=C["text"]))
-
-        if is_fav:
-            tk.Label(title_row, text="  ★ FAVOURITE", bg=bg, fg=C["gold"],
-                     font=self.F(-2, True)).pack(side="left")
-
-        price = self.item.get("price")
-        if price:
-            tk.Label(title_row, text=f"  {price}", bg=bg, fg=C["muted"],
-                     font=self.F(-1)).pack(side="left")
-
-        self.sub = tk.Label(info, text="Waiting for first check…",
-                            bg=bg, fg=C["muted"], font=self.F(-2), anchor="w")
-        self.sub.pack(fill="x")
-
-        # Right-side controls
-        right = tk.Frame(self, bg=bg)
-        right.pack(side="right")
-
-        # Quick check
-        check_btn = tk.Button(
-            right, text="⟳",
-            command=lambda: self.on_quick_check(self.item),
-            bg=C["tag_bg"], fg=C["muted"],
-            activebackground=C["accent"], activeforeground=C["white"],
-            relief="flat", bd=0, cursor="hand2",
-            font=self.F(1), padx=6, pady=2)
-        check_btn.pack(side="left", padx=(0, 4))
-        tooltip(check_btn, "Check this item now")
-
-        # Open page
-        self.store_btn = tk.Button(
-            right, text="Open Page",
-            command=lambda: webbrowser.open(
-                f"{store_home(region)}/products/{self.item['slug']}"),
-            bg=C["tag_bg"], fg=C["muted"],
-            activebackground=C["accent"], activeforeground=C["white"],
-            relief="flat", bd=0, cursor="hand2",
-            font=self.F(-1), padx=8, pady=3)
-        self.store_btn.pack(side="left", padx=(0, 8))
-
-        # Status badge
-        self.badge = tk.Label(right, text="UNKNOWN",
-                              bg=C["tag_bg"], fg=C["muted"],
-                              font=self.F(-2, True), padx=8, pady=3)
-        self.badge.pack(side="left", padx=(0, 8))
-
-        # Remove
-        rem = tk.Label(right, text="✕", bg=bg, fg=C["muted"],
-                       font=self.F(0), cursor="hand2")
-        rem.pack(side="left")
-        rem.bind("<Button-1>", lambda _: self.on_remove(self.item))
-        rem.bind("<Enter>",    lambda _: rem.config(fg=C["red"]))
-        rem.bind("<Leave>",    lambda _: rem.config(fg=C["muted"]))
-        tooltip(rem, "Remove from watch list")
+    def _context(self, event):
+        m = self._menu()
+        try:
+            m.tk_popup(event.x_root, event.y_root)
+        finally:
+            m.grab_release()
 
     def update_status(self, in_stock, checked_at=None, price=None, note=None):
-        C = self.C
         self.in_stock = in_stock
+        coming = bool(note and note.startswith("coming soon"))
         if in_stock is None:
-            self.dot.config(fg=C["muted"])
-            self.badge.config(text="UNKNOWN", bg=C["tag_bg"], fg=C["muted"])
-            self.store_btn.config(bg=C["tag_bg"], fg=C["muted"])
+            self.pill.config(text="NOT CHECKED", style="Neutral.Pill.TLabel")
         elif in_stock:
-            self.dot.config(fg=C["green"])
-            self.badge.config(text="IN STOCK", bg="#1a3a2a", fg=C["green"])
-            self.store_btn.config(bg=C["green"], fg="#000000", font=self.F(-1, True))
+            self.pill.config(text="IN STOCK", style="Green.Pill.TLabel")
+        elif coming:
+            self.pill.config(text="COMING SOON", style="Amber.Pill.TLabel")
         else:
-            self.dot.config(fg=C["red"])
-            self.badge.config(text="OUT OF STOCK", bg="#2a1a1a", fg=C["red"])
-            self.store_btn.config(bg=C["tag_bg"], fg=C["muted"], font=self.F(-1, False))
-        sub_parts = []
-        if checked_at:
-            sub_parts.append(f"Checked {checked_at}")
+            self.pill.config(text="SOLD OUT", style="Red.Pill.TLabel")
+        self.configure(style="Hot.Tile.TFrame" if in_stock else "Tile.TFrame")
+        if in_stock:
+            self.open_btn.grid(row=0, column=4, rowspan=2, padx=(0, self.T.S(6)))
+        else:
+            self.open_btn.grid_remove()
         if price:
-            sub_parts.append(price)
-        if note:
-            sub_parts.append(note)
-        if sub_parts:
-            self.sub.config(text="  ·  ".join(sub_parts))
-            # The restock estimate is the actionable part of the line.
-            self.sub.config(fg=C["yellow"] if note else C["muted"])
+            self.price_lbl.config(text=price)
+        parts = []
+        if note and not coming:
+            parts.append(note)
+        elif coming and "·" in note:
+            parts.append(note.split("·", 1)[1].strip())
+        if checked_at:
+            parts.append(f"checked {checked_at}")
+        if parts:
+            self.sub.config(text="  ·  ".join(parts),
+                            style="Card.Amber.TLabel" if (note and not in_stock) else "Card.Faint.TLabel")
 
     def mark_delisted(self):
         """The store no longer carries this slug; stop implying it is tracked."""
-        C = self.C
         self.in_stock = None
-        self.dot.config(fg=C["muted"])
-        self.badge.config(text="DELISTED", bg=C["tag_bg"], fg=C["yellow"])
-        self.store_btn.config(bg=C["tag_bg"], fg=C["muted"])
-        self.sub.config(text="No longer listed on the store — remove or re-add it.")
-
-
-# ── Section header ────────────────────────────────────────────────────────────
-
-class SectionHeader(tk.Frame):
-    def __init__(self, parent, text, C, settings):
-        super().__init__(parent, bg=C["bg"], pady=6, padx=14)
-        tk.Label(self, text=text, bg=C["bg"], fg=C["muted"],
-                 font=(settings["font_family"],
-                       settings["font_size"] - 2, "bold")).pack(side="left")
+        self.pill.config(text="DELISTED", style="Amber.Pill.TLabel")
+        self.open_btn.grid_remove()
+        self.configure(style="Tile.TFrame")
+        self.sub.config(text="No longer on the store. Remove it, or add it again if it comes back.",
+                        style="Card.Amber.TLabel")
 
 
 # ── History tab ───────────────────────────────────────────────────────────────
 
-class HistoryTab(tk.Frame):
-    def __init__(self, parent, C, settings):
-        super().__init__(parent, bg=C["bg"])
-        self.C = C
-        self.settings = settings
+class HistoryTab(ttk.Frame):
+    """Stock changes: watched products, or everything the store changed."""
+
+    def __init__(self, parent, app):
+        super().__init__(parent, padding=(app.theme.S(20), app.theme.S(14)))
+        self.app, self.T = app, app.theme
         self._build()
 
-    def F(self, d=0, b=False):
-        return (self.settings["font_family"],
-                self.settings["font_size"] + d,
-                "bold" if b else "normal")
-
     def _build(self):
-        C = self.C
-        # Stats summary
-        stats_frame = tk.Frame(self, bg=C["panel"], pady=14, padx=20)
-        stats_frame.pack(fill="x")
-        tk.Label(stats_frame, text="Statistics", bg=C["panel"], fg=C["text"],
-                 font=self.F(2, True)).pack(side="left")
-        self.stats_lbl = tk.Label(stats_frame, text="", bg=C["panel"],
-                                  fg=C["muted"], font=self.F(-1))
-        self.stats_lbl.pack(side="right")
+        T, S = self.T, self.T.S
+        bar = ttk.Frame(self)
+        bar.pack(fill="x", pady=(0, S(12)))
+        self.watched_only = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="  Watched products only", variable=self.watched_only,
+                        command=self.refresh).pack(side="left")
+        self.q = tk.StringVar()
+        self.q.trace_add("write", lambda *_: self.refresh())
+        e = ttk.Entry(bar, textvariable=self.q, width=26)
+        e.pack(side="left", padx=(S(14), 0))
+        placeholder(e, self.q, "Filter by product name", T)
+        ttk.Button(bar, text="Clear history", command=self._clear).pack(side="right")
+        ttk.Button(bar, text="Export CSV…", command=self._export).pack(side="right", padx=(0, S(8)))
+        self.stats_lbl = ttk.Label(self, style="Muted.TLabel")
+        self.stats_lbl.pack(fill="x", pady=(0, S(8)))
 
-        hsep(self, C)
-
-        # Toolbar
-        tbar = tk.Frame(self, bg=C["bg"], pady=8, padx=16)
-        tbar.pack(fill="x")
-        tk.Button(tbar, text="Refresh", command=self.refresh,
-                  bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                  cursor="hand2", font=self.F(-1), padx=10, pady=4
-                  ).pack(side="left", padx=(0, 8))
-        tk.Button(tbar, text="Clear History", command=self._clear,
-                  bg=C["panel"], fg=C["red"], relief="flat", bd=0,
-                  cursor="hand2", font=self.F(-1), padx=10, pady=4
-                  ).pack(side="left")
-
-        hsep(self, C)
-
-        # Event log
-        wrap = tk.Frame(self, bg=C["bg"])
-        wrap.pack(fill="both", expand=True, padx=10, pady=8)
-        sb = tk.Scrollbar(wrap, bg=C["panel"], troughcolor=C["bg"],
-                          relief="flat", width=8)
+        card = ttk.Frame(self, style="Tile.TFrame", padding=S(1))
+        card.pack(fill="both", expand=True)
+        inner = ttk.Frame(card, style="Card.TFrame", padding=S(4))
+        inner.pack(fill="both", expand=True, padx=S(2), pady=S(2))
+        cols = (("time", "When", 150), ("product", "Product", 330),
+                ("change", "Change", 150), ("price", "Price", 100))
+        self.tree = ttk.Treeview(inner, columns=[c[0] for c in cols], show="headings",
+                                 selectmode="browse")
+        for key, label, width in cols:
+            self.tree.heading(key, text=label, anchor="w")
+            self.tree.column(key, width=S(width), minwidth=S(60), anchor="w",
+                             stretch=key == "product")
+        self.tree.tag_configure("in", foreground=T.c["green"])
+        self.tree.tag_configure("first", foreground=T.c["text2"])
+        sb = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview,
+                           style="Card.Vertical.TScrollbar")
+        self.tree.configure(yscrollcommand=sb.set)
         sb.pack(side="right", fill="y")
-        self.log = tk.Text(wrap, bg=C["panel"], fg=C["text"],
-                           font=("Consolas", max(8, self.settings["font_size"] - 1)),
-                           relief="flat", bd=0, state="disabled", wrap="word",
-                           yscrollcommand=sb.set, highlightthickness=0)
-        self.log.pack(fill="both", expand=True)
-        sb.config(command=self.log.yview)
-        self.log.tag_config("ts",    foreground="#444d56")
-        self.log.tag_config("ok",    foreground=C["green"])
-        self.log.tag_config("oos",   foreground=C["red"])
-        self.log.tag_config("price", foreground=C["gold"])
+        self.tree.pack(side="left", fill="both", expand=True)
+        self.tree.bind("<Double-Button-1>", self._open_selected)
+        self.empty = ttk.Label(inner, style="Card.Muted.TLabel", justify="center",
+                               text="No stock changes yet.\nThey appear here as the watcher "
+                                    "notices products coming into or going out of stock.")
+
+    def _events(self):
+        events = stock_history.get_events(limit=0, watched_only=self.watched_only.get())
+        q = self.q.get().lower().strip()
+        if q:
+            events = [e for e in events if q in str(e.get("title", "")).lower()]
+        return list(reversed(events))
 
     def refresh(self):
-        stats  = stock_history.get_stats()
-        events = stock_history.get_events(limit=200)
+        stats = stock_history.get_stats()
         self.stats_lbl.config(
-            text=f"Total checks: {stats['total_checks']}  ·  "
-                 f"In-stock alerts: {stats['in_stock_alerts']}")
-        self.log.config(state="normal")
-        self.log.delete("1.0", "end")
-        for ev in reversed(events):
-            ts = ev["ts"][:19].replace("T", " ")
-            status = "IN STOCK" if ev["in_stock"] else "out of stock"
-            tag = "ok" if ev["in_stock"] else "oos"
-            self.log.insert("end", f"[{ts}] ", "ts")
-            self.log.insert("end", f"{status:<14}", tag)
-            self.log.insert("end", f"  {ev['title']}")
-            if ev.get("price"):
-                self.log.insert("end", f"  {ev['price']}", "price")
-            self.log.insert("end", "\n")
-        self.log.config(state="disabled")
+            text=f"{plural(stats.get('total_checks', 0), 'check')} of watched products  ·  "
+                 f"{plural(stats.get('alerts', 0), 'in-stock alert')}")
+        self.tree.delete(*self.tree.get_children())
+        events = self._events()
+        for i, ev in enumerate(events[:2000]):
+            ts = friendly_time(ev.get("ts", ""))
+            if ev.get("first"):
+                change = "Added: in stock" if ev.get("in_stock") else "Added: sold out"
+                tag = "first"
+            else:
+                change = "▲  In stock" if ev.get("in_stock") else "▼  Sold out"
+                tag = "in" if ev.get("in_stock") else "out"
+            self.tree.insert("", "end", iid=f"e{i}", values=(
+                ts, ev.get("title", ev.get("slug")), change, ev.get("price") or ""),
+                tags=(tag, ev.get("slug", "")))
+        if events:
+            self.empty.place_forget()
+        else:
+            self.empty.place(relx=0.5, rely=0.45, anchor="center")
+
+    def _open_selected(self, _):
+        sel = self.tree.selection()
+        if sel:
+            tags = self.tree.item(sel[0], "tags")
+            if len(tags) > 1:
+                webbrowser.open(product_url(tags[1], self.app.settings.get("region", "us")))
+
+    def _export(self):
+        path = filedialog.asksaveasfilename(
+            parent=self, defaultextension=".csv", filetypes=[("CSV", "*.csv")],
+            initialfile="unifi-stock-history.csv")
+        if not path:
+            return
+        with open(path, "w", newline="", encoding="utf-8") as fh:
+            w = csv.writer(fh)
+            w.writerow(["time", "product", "slug", "in_stock", "price", "watched"])
+            for e in reversed(self._events()):
+                w.writerow([e.get("ts"), e.get("title"), e.get("slug"),
+                            e.get("in_stock"), e.get("price") or "", e.get("watched", True)])
+        self.app._log(f"History exported to {path}", "ok")
 
     def _clear(self):
-        if messagebox.askyesno("Clear History",
-                               "Delete all stock check history?", parent=self):
+        if messagebox.askyesno("Clear history",
+                               "Delete the whole history of stock changes?", parent=self):
             stock_history.clear()
             self.refresh()
 
 
 # ── Settings tab ──────────────────────────────────────────────────────────────
 
-class SettingsTab(tk.Frame):
-    COLOUR_KEYS = [
-        ("bg",      "Background"),
-        ("panel",   "Panel / Card"),
-        ("accent",  "Accent (buttons, links)"),
-        ("green",   "In Stock colour"),
-        ("red",     "Out of Stock colour"),
-        ("gold",    "Favourite star colour"),
-        ("text",    "Primary text"),
-        ("muted",   "Secondary text"),
-    ]
-    FONT_OPTIONS = ["Segoe UI", "Arial", "Calibri", "Verdana",
-                    "Tahoma", "Trebuchet MS", "Courier New", "Consolas"]
-    SIZE_OPTIONS = [8, 9, 10, 11, 12, 13, 14]
-    PRESETS = {
-        "Dark (default)": {
-            "bg": "#0d1117", "panel": "#161b22", "accent": "#1f6feb",
-            "green": "#3fb950", "red": "#f85149", "gold": "#e3b341",
-            "text": "#e6edf3", "muted": "#7d8590",
-        },
-        "Midnight Blue": {
-            "bg": "#0a0f1e", "panel": "#111827", "accent": "#3b82f6",
-            "green": "#22c55e", "red": "#ef4444", "gold": "#f59e0b",
-            "text": "#f1f5f9", "muted": "#64748b",
-        },
-        "Slate": {
-            "bg": "#1e293b", "panel": "#273548", "accent": "#38bdf8",
-            "green": "#4ade80", "red": "#fb7185", "gold": "#fbbf24",
-            "text": "#f8fafc", "muted": "#94a3b8",
-        },
-        "Light": {
-            "bg": "#f0f4f8", "panel": "#ffffff", "accent": "#2563eb",
-            "green": "#16a34a", "red": "#dc2626", "gold": "#d97706",
-            "text": "#1e293b", "muted": "#64748b",
-        },
-        "UniFi Blue": {
-            "bg": "#0b1628", "panel": "#122040", "accent": "#006fff",
-            "green": "#00e676", "red": "#ff5252", "gold": "#ffc107",
-            "text": "#e8edf5", "muted": "#7889a0",
-        },
-    }
+class SettingsTab(ttk.Frame):
+    """Settings take effect, and are saved, as soon as they change."""
 
-    def __init__(self, parent, settings, on_apply):
-        super().__init__(parent, bg="#0d1117")
-        self.settings = settings.copy()
-        self.on_apply = on_apply
-        self._vars     = {}
-        self._swatches = {}
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.app, self.T = app, app.theme
+        self._swatch_imgs = []
+        self._vars = {}
         self._build()
 
+    # Layout helpers -------------------------------------------------------
+
+    def _section(self, title):
+        S = self.T.S
+        ttk.Label(self.body, text=title, style="Strong.TLabel").pack(
+            fill="x", pady=(S(18), S(6)))
+        tile = ttk.Frame(self.body, style="Tile.TFrame", padding=S(1))
+        tile.pack(fill="x")
+        inner = ttk.Frame(tile, style="Card.TFrame")
+        inner.pack(fill="x", padx=S(2), pady=S(2))
+        inner._rows = 0
+        return inner
+
+    def _row(self, section, title, desc=None):
+        """A row in a section: text on the left, the returned frame on the right."""
+        S = self.T.S
+        if section._rows:
+            ttk.Frame(section, style="Divider.TFrame", height=1).pack(fill="x")
+        section._rows += 1
+        row = ttk.Frame(section, style="Card.TFrame", padding=(S(16), S(11)))
+        row.pack(fill="x")
+        row.columnconfigure(0, weight=1)
+        text = ttk.Frame(row, style="Card.TFrame")
+        text.grid(row=0, column=0, sticky="w")
+        ttk.Label(text, text=title, style="Card.TLabel").pack(anchor="w")
+        if desc:
+            ttk.Label(text, text=desc, style="Card.Faint.TLabel",
+                      wraplength=S(430), justify="left").pack(anchor="w", pady=(S(1), 0))
+        right = ttk.Frame(row, style="Card.TFrame")
+        right.grid(row=0, column=1, sticky="e", padx=(S(16), 0))
+        return right
+
+    def _switch(self, parent, key, on_change=None, value=None):
+        var = tk.BooleanVar(value=self.app.settings.get(key) if value is None else value)
+        self._vars[key] = var
+
+        def changed():
+            if on_change:
+                on_change(var.get())
+            else:
+                self.app.set_setting(key, var.get())
+        sw = ttk.Checkbutton(parent, variable=var, style="Card.Switch.TCheckbutton",
+                             command=changed, takefocus=True)
+        sw.pack(side="right")
+        return sw
+
+    # Build ------------------------------------------------------------------
+
     def _build(self):
-        bg = self.settings.get("bg", "#0d1117")
-        C  = build_palette(self.settings)
+        app, T, S = self.app, self.T, self.T.S
+        sf = ScrollFrame(self, T)
+        sf.pack(fill="both", expand=True)
+        self.body = ttk.Frame(sf.inner, padding=(S(20), S(0), S(20), S(24)))
+        self.body.pack(fill="x")
 
-        canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
-        sb = tk.Scrollbar(self, orient="vertical", command=canvas.yview,
-                          bg=C["panel"], troughcolor=bg, relief="flat", width=10)
-        canvas.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
+        sec = self._section("Watching")
+        r = self._row(sec, "Check the store every",
+                      "Each check reads the whole catalog, 8 requests, however many products "
+                      "you watch. Every minute or slower is kindest to the store.")
+        labels = [label for _, label in INTERVALS]
+        cur = app.settings["poll_interval"]
+        if interval_label(cur) not in labels:
+            labels.append(interval_label(cur))
+        self.interval = ttk.Combobox(r, state="readonly", values=labels, width=14)
+        self.interval.set(interval_label(cur))
+        self.interval.bind("<<ComboboxSelected>>", self._interval_changed)
+        self.interval.pack(side="right")
 
-        inner = tk.Frame(canvas, bg=bg, padx=28, pady=24)
-        cw = canvas.create_window((0, 0), window=inner, anchor="nw")
-        inner.bind("<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.bind("<Configure>",
-            lambda e: canvas.itemconfig(cw, width=e.width))
+        r = self._row(sec, "Store", "Prices and stock come from this regional store.")
+        self._regions = {v["label"]: k for k, v in STORE_REGIONS.items()}
+        self.region = ttk.Combobox(r, state="readonly", values=list(self._regions), width=18)
+        self.region.set(STORE_REGIONS[app.settings["region"]]["label"])
+        self.region.bind("<<ComboboxSelected>>",
+                         lambda _: app.set_setting("region", self._regions[self.region.get()]))
+        self.region.pack(side="right")
 
-        ff  = (self.settings["font_family"], self.settings["font_size"])
-        ffb = (self.settings["font_family"], self.settings["font_size"], "bold")
-        ffs = (self.settings["font_family"], self.settings["font_size"] - 1)
+        r = self._row(sec, "Start watching when the app opens")
+        self._switch(r, "auto_start")
 
-        def head(text, pady_top=16):
-            tk.Label(inner, text=text, bg=bg, fg=C["text"],
-                     font=(self.settings["font_family"],
-                           self.settings["font_size"] + 1, "bold"),
-                     anchor="w").pack(fill="x", pady=(pady_top, 6))
-            tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(0, 12))
+        sec = self._section("Alerts")
+        r = self._row(sec, "Show a notification",
+                      "When a product on your watch list comes back in stock. "
+                      "Click it to open the product's page.")
+        self._switch(r, "notifications")
+        r = self._row(sec, "Play a sound")
+        self._switch(r, "sound_alerts")
+        r = self._row(sec, "Open the product's page", "In your browser, the moment it's back.")
+        self._switch(r, "auto_open_url")
+        r = self._row(sec, "Try it", "Shows what an alert looks like.")
+        ttk.Button(r, text="Send a test alert", command=app._test_notif).pack(side="right")
 
-        # ── Behaviour ─────────────────────────────────────────────────
-        head("Behaviour", pady_top=0)
+        sec = self._section("App")
+        if winplatform.IS_WINDOWS:
+            r = self._row(sec, "Start with Windows",
+                          "Starts in the notification area when you sign in, and starts watching.")
+            self._switch(r, "start_with_windows", on_change=app._set_autostart,
+                         value=winplatform.autostart_enabled())
+        r = self._row(sec, "Keep running in the notification area when closed",
+                      "Closing the window keeps watching. Quit from the tray icon's menu.")
+        self._switch(r, "close_to_tray")
 
-        r1 = tk.Frame(inner, bg=bg); r1.pack(fill="x", pady=(0, 8))
-        tk.Label(r1, text="Poll interval (seconds)", bg=bg, fg=C["muted"],
-                 font=ffs, width=24, anchor="w").pack(side="left")
-        self._vars["poll_interval"] = tk.IntVar(
-            value=self.settings.get("poll_interval", 60))
-        tk.Spinbox(r1, from_=15, to=600, increment=15,
-                   textvariable=self._vars["poll_interval"],
-                   bg=C["panel"], fg=C["text"], font=ff, width=6,
-                   relief="flat", bd=1, buttonbackground=C["panel"]
-                   ).pack(side="left")
+        sec = self._section("Appearance")
+        r = self._row(sec, "Theme")
+        names = [label for _, label in THEME_NAMES]
+        self.theme_box = ttk.Combobox(r, state="readonly", values=names, width=20)
+        self.theme_box.set(dict(THEME_NAMES)[app.settings["theme"]])
+        self.theme_box.bind("<<ComboboxSelected>>", lambda _: app.set_setting(
+            "theme", {label: k for k, label in THEME_NAMES}[self.theme_box.get()]))
+        self.theme_box.pack(side="right")
+        r = self._row(sec, "Accent colour", "Buttons, switches and the selected tab.")
+        self._build_swatches(r)
+        r = self._row(sec, "Text size")
+        self.size_box = ttk.Combobox(r, state="readonly", width=6,
+                                     values=[str(s) for s in (9, 10, 11, 12, 13, 14)])
+        self.size_box.set(str(app.settings["font_size"]))
+        self.size_box.bind("<<ComboboxSelected>>",
+                           lambda _: app.set_setting("font_size", int(self.size_box.get())))
+        self.size_box.pack(side="right")
 
-        r2 = tk.Frame(inner, bg=bg); r2.pack(fill="x", pady=(0, 8))
-        self._vars["sound_alerts"] = tk.BooleanVar(
-            value=self.settings.get("sound_alerts", True))
-        tk.Checkbutton(r2, text="Play sound on in-stock alerts",
-                       variable=self._vars["sound_alerts"],
-                       bg=bg, fg=C["text"], selectcolor=C["panel"],
-                       activebackground=bg, activeforeground=C["text"],
-                       font=ff, bd=0, highlightthickness=0).pack(side="left")
+        sec = self._section("Watch list")
+        r = self._row(sec, "Export the watch list", "A JSON file you can keep or share.")
+        ttk.Button(r, text="Export…", command=self._export).pack(side="right")
+        r = self._row(sec, "Import a watch list",
+                      "Adds the products in a file. Ones you already watch are skipped.")
+        ttk.Button(r, text="Import…", command=self._import).pack(side="right")
 
-        r3 = tk.Frame(inner, bg=bg); r3.pack(fill="x", pady=(0, 8))
-        self._vars["auto_open_url"] = tk.BooleanVar(
-            value=self.settings.get("auto_open_url", True))
-        tk.Checkbutton(r3, text="Auto-open store page when in stock",
-                       variable=self._vars["auto_open_url"],
-                       bg=bg, fg=C["text"], selectcolor=C["panel"],
-                       activebackground=bg, activeforeground=C["text"],
-                       font=ff, bd=0, highlightthickness=0).pack(side="left")
+        sec = self._section("Updates")
+        kind = updater.install_kind()
+        kinds = {"installed": "Installed for this Windows user",
+                 "portable": "Portable copy",
+                 "folder": "Copied to this folder by hand",
+                 "source": "Running from source: update with git pull"}
+        r = self._row(sec, f"{APP_NAME} {__version__}", kinds[kind])
+        self.check_btn = ttk.Button(r, text="Check for updates", command=app.check_for_updates)
+        self.check_btn.pack(side="right")
+        r = self._row(sec, "Status")
+        self.update_lbl = ttk.Label(r, text=app.update_status, style="Card.Muted.TLabel",
+                                    wraplength=S(360), justify="right")
+        self.update_lbl.pack(side="right")
+        self.install_row = r
+        self.install_btn = ttk.Button(r, text="Install and restart", style="Card.Accent.TButton",
+                                      command=app.install_update)
+        r = self._row(sec, "Check for updates automatically",
+                      "Once a day, one small request to GitHub. Nothing is downloaded "
+                      "until you click Install.")
+        self._switch(r, "check_updates")
+        self.refresh_update()
 
-        r4 = tk.Frame(inner, bg=bg); r4.pack(fill="x", pady=(0, 8))
-        self._vars["auto_start"] = tk.BooleanVar(
-            value=self.settings.get("auto_start", False))
-        tk.Checkbutton(r4, text="Auto-start watching on launch",
-                       variable=self._vars["auto_start"],
-                       bg=bg, fg=C["text"], selectcolor=C["panel"],
-                       activebackground=bg, activeforeground=C["text"],
-                       font=ff, bd=0, highlightthickness=0).pack(side="left")
+        sec = self._section("About")
+        r = self._row(sec, "Your files", str(BASE_DIR))
+        ttk.Button(r, text="Open folder", command=lambda: winplatform.open_path(BASE_DIR)).pack(side="right")
+        r = self._row(sec, "Report a problem",
+                      f"Opens a GitHub issue with the version filled in. The log "
+                      f"({LOG_FILE.name}, in the folder above) helps.")
+        ttk.Button(r, text="Report…", command=lambda: webbrowser.open(ISSUE_URL)).pack(side="right")
+        r = self._row(sec, "Project page", SITE_URL)
+        ttk.Button(r, text="Open", command=lambda: webbrowser.open(SITE_URL)).pack(side="right")
+        ttk.Label(self.body, style="Faint.TLabel", wraplength=S(640), justify="left",
+                  text=f"{APP_NAME} is free and open source under the MIT license. It is an "
+                       "independent project, not made, endorsed or supported by Ubiquiti. "
+                       "UniFi is a trademark of Ubiquiti Inc.").pack(fill="x", pady=(S(18), 0))
 
-        r5 = tk.Frame(inner, bg=bg); r5.pack(fill="x", pady=(0, 8))
-        tk.Label(r5, text="Store region", bg=bg, fg=C["muted"],
-                 font=ffs, width=24, anchor="w").pack(side="left")
-        self._vars["region"] = tk.StringVar(
-            value=self.settings.get("region", "us"))
-        ttk.Combobox(r5, textvariable=self._vars["region"],
-                     values=list(STORE_REGIONS.keys()), width=10,
-                     state="readonly").pack(side="left")
-        self._region_lbl = tk.Label(r5, text="", bg=bg, fg=C["muted"], font=ffs)
-        self._region_lbl.pack(side="left", padx=(8, 0))
-        def _upd_rgn(*_):
-            rgn = self._vars["region"].get()
-            self._region_lbl.config(text=STORE_REGIONS.get(rgn, {}).get("label", ""))
-        self._vars["region"].trace_add("write", _upd_rgn)
-        _upd_rgn()
+    def _build_swatches(self, parent):
+        T, S = self.T, self.T.S
+        current = self.app.settings.get("accent", "")
+        size = S(26)
+        swatches = list(theming.ACCENT_SWATCHES)
+        if current and current not in [h for _, h in swatches]:
+            swatches.append(("Your colour", current))
+        ttk.Button(parent, text="Custom…", style="Card.Subtle.TButton",
+                   command=self._custom_accent).pack(side="right", padx=(S(4), 0))
+        for name, hexv in reversed(swatches):
+            colour = hexv or (winplatform.system_accent(T.dark) or T.c["default_accent"])
+            R = gfx.Raster(size, size)
+            if hexv == current:
+                R.draw(gfx.sd_circle(size / 2, size / 2, size / 2 - 0.5), T.c["text"])
+                R.draw(gfx.sd_circle(size / 2, size / 2, size / 2 - S(2.5)), T.c["surface"])
+            R.draw(gfx.sd_circle(size / 2, size / 2, size / 2 - S(4)), colour)
+            img = tk.PhotoImage(master=self, data=R.png_b64(), format="png")
+            self._swatch_imgs.append(img)
+            b = ttk.Button(parent, image=img, style="Card.Subtle.TButton", takefocus=False,
+                           command=lambda h=hexv: self.app.set_setting("accent", h))
+            b.configure(padding=S(2))
+            b.pack(side="right")
+            Tooltip(b, name if hexv else "Windows' accent colour", T)
 
-        # ── Typography ────────────────────────────────────────────────
-        head("Typography")
-        row = tk.Frame(inner, bg=bg); row.pack(fill="x", pady=(0, 12))
-        tk.Label(row, text="Font family", bg=bg, fg=C["muted"],
-                 font=ffs, width=18, anchor="w").pack(side="left")
-        self._vars["font_family"] = tk.StringVar(value=self.settings["font_family"])
-        ttk.Combobox(row, textvariable=self._vars["font_family"],
-                     values=self.FONT_OPTIONS, width=20, state="readonly").pack(side="left", padx=(0, 24))
-        tk.Label(row, text="Font size", bg=bg, fg=C["muted"],
-                 font=ffs, width=12, anchor="w").pack(side="left")
-        self._vars["font_size"] = tk.IntVar(value=self.settings["font_size"])
-        ttk.Combobox(row, textvariable=self._vars["font_size"],
-                     values=self.SIZE_OPTIONS, width=6, state="readonly").pack(side="left")
-
-        # ── Colour presets ────────────────────────────────────────────
-        head("Colour Presets")
-        preset_row = tk.Frame(inner, bg=bg); preset_row.pack(fill="x", pady=(0, 16))
-        for name in self.PRESETS:
-            tk.Button(preset_row, text=name, command=lambda n=name: self._apply_preset(n),
-                      bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                      cursor="hand2", font=ffs, padx=12, pady=5,
-                      activebackground=C["hover"], activeforeground=C["text"]
-                      ).pack(side="left", padx=(0, 8))
-
-        # ── Individual colours ────────────────────────────────────────
-        head("Individual Colours")
-        for key, label in self.COLOUR_KEYS:
-            r = tk.Frame(inner, bg=bg); r.pack(fill="x", pady=5)
-            tk.Label(r, text=label, bg=bg, fg=C["text"], font=ff, width=24, anchor="w").pack(side="left")
-            swatch = tk.Label(r, text="       ", bg=self.settings.get(key, "#888888"),
-                              relief="flat", cursor="hand2", bd=1,
-                              highlightbackground=C["border"], highlightthickness=1)
-            swatch.pack(side="left", padx=(0, 10), ipady=4)
-            swatch.bind("<Button-1>", lambda e, k=key: self._pick_colour(k))
-            self._swatches[key] = swatch
-            val_lbl = tk.Label(r, text=self.settings.get(key, "#888888"), bg=bg,
-                               fg=C["muted"], font=("Consolas", self.settings["font_size"] - 1))
-            val_lbl.pack(side="left")
-            self._vars[f"_clbl_{key}"] = val_lbl
-
-        # ── Watch List export/import ──────────────────────────────────
-        head("Watch List")
-        ei_row = tk.Frame(inner, bg=bg); ei_row.pack(fill="x", pady=(0, 12))
-        tk.Button(ei_row, text="Export Watch List", command=self._export,
-                  bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                  cursor="hand2", font=ff, padx=14, pady=7,
-                  activebackground=C["hover"]).pack(side="left", padx=(0, 8))
-        tk.Button(ei_row, text="Import Watch List", command=self._import,
-                  bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                  cursor="hand2", font=ff, padx=14, pady=7,
-                  activebackground=C["hover"]).pack(side="left")
-
-        # ── Apply / Reset ─────────────────────────────────────────────
-        tk.Frame(inner, bg=C["border"], height=1).pack(fill="x", pady=(24, 12))
-        btn_row = tk.Frame(inner, bg=bg); btn_row.pack(fill="x")
-        tk.Button(btn_row, text="Reset to Default", command=self._reset,
-                  bg=C["panel"], fg=C["text"], relief="flat", bd=0,
-                  cursor="hand2", font=ff, padx=14, pady=7,
-                  activebackground=C["hover"]).pack(side="left")
-        tk.Button(btn_row, text="Apply & Restart View", command=self._apply,
-                  bg=C["accent"], fg=C["white"], relief="flat", bd=0,
-                  cursor="hand2", font=ffb, padx=14, pady=7,
-                  activebackground=C["accent_h"]).pack(side="right")
-
-    def _pick_colour(self, key):
-        initial = self.settings.get(key, "#888888")
-        result = colorchooser.askcolor(color=initial, title=f"Choose {key} colour", parent=self)
+    def _custom_accent(self):
+        initial = self.app.settings.get("accent") or self.T.c["accent"]
+        result = colorchooser.askcolor(color=initial, title="Accent colour", parent=self)
         if result and result[1]:
-            hex_val = result[1].lower()
-            self.settings[key] = hex_val
-            self._swatches[key].config(bg=hex_val)
-            lbl = self._vars.get(f"_clbl_{key}")
-            if lbl: lbl.config(text=hex_val)
+            self.app.set_setting("accent", result[1].lower())
 
-    def _apply_preset(self, name):
-        preset = self.PRESETS[name]
-        for k, v in preset.items():
-            self.settings[k] = v
-            if k in self._swatches: self._swatches[k].config(bg=v)
-            lbl = self._vars.get(f"_clbl_{k}")
-            if lbl: lbl.config(text=v)
+    def _interval_changed(self, _):
+        label = self.interval.get()
+        seconds = next((s for s, lab in INTERVALS if lab == label), None)
+        if seconds is None:
+            seconds = int(label.split()[0])
+        self.app.set_setting("poll_interval", seconds)
 
-    def _reset(self):
-        for k, v in DEFAULT_SETTINGS.items():
-            self.settings[k] = v
-            if k in self._swatches: self._swatches[k].config(bg=str(v))
-            lbl = self._vars.get(f"_clbl_{k}")
-            if lbl and isinstance(lbl, tk.Label): lbl.config(text=str(v))
-        for key in ("font_family", "font_size", "poll_interval",
-                    "sound_alerts", "auto_open_url", "auto_start", "region"):
-            if key in self._vars: self._vars[key].set(DEFAULT_SETTINGS[key])
-
-    def _apply(self):
-        self.settings["font_family"]   = self._vars["font_family"].get()
-        self.settings["font_size"]     = int(self._vars["font_size"].get())
-        self.settings["poll_interval"] = int(self._vars["poll_interval"].get())
-        self.settings["sound_alerts"]  = self._vars["sound_alerts"].get()
-        self.settings["auto_open_url"] = self._vars["auto_open_url"].get()
-        self.settings["auto_start"]    = self._vars["auto_start"].get()
-        self.settings["region"]        = self._vars["region"].get()
-        save_settings(self.settings)
-        self.on_apply(self.settings)
+    def refresh_update(self):
+        app = self.app
+        self.update_lbl.config(text=app.update_status)
+        u = app.available_update
+        if u and u.can_install:
+            self.install_btn.config(text=f"Install {u.version} and restart",
+                                    state="disabled" if app.update_busy else "normal")
+            self.install_btn.pack(side="right", padx=(self.T.S(12), 0))
+        else:
+            self.install_btn.pack_forget()
+        self.check_btn.config(state="disabled" if app.update_busy else "normal")
 
     def _export(self):
         path = filedialog.asksaveasfilename(
             defaultextension=".json", filetypes=[("JSON", "*.json")],
-            initialfile="unifi_watchlist_export.json", parent=self)
+            initialfile="unifi-watchlist.json", parent=self)
         if path:
             n = export_watchlist(path)
-            messagebox.showinfo("Exported", f"Exported {n} item(s) to:\n{path}", parent=self)
+            messagebox.showinfo("Exported", f"Exported {n} product(s) to:\n{path}", parent=self)
 
     def _import(self):
         path = filedialog.askopenfilename(filetypes=[("JSON", "*.json")], parent=self)
         if path:
             try:
                 n = import_watchlist(path)
-                messagebox.showinfo("Imported", f"Added {n} new item(s).", parent=self)
             except Exception as ex:
-                messagebox.showerror("Import Error", str(ex), parent=self)
+                messagebox.showerror("Import failed", str(ex), parent=self)
+                return
+            self.app.watched = load_watched()
+            self.app._refresh_list()
+            messagebox.showinfo("Imported", f"Added {n} new product(s).", parent=self)
 
 
 # ── Main app ──────────────────────────────────────────────────────────────────
 
 class UnifiWatcherApp(tk.Tk):
 
-    def __init__(self):
+    def __init__(self, start_minimized=False, watch_now=False, use_tray=True,
+                 check_updates=True):
         super().__init__()
         self.settings = load_settings()
-        self.C        = build_palette(self.settings)
-
-        self.title("Unifi Stock Watcher")
-        self.geometry("660x820")
-        self.minsize(520, 580)
-        self.configure(bg=self.C["bg"])
+        if start_minimized and use_tray and traymod.AVAILABLE:
+            self.withdraw()                 # no flash before going to the tray
+        self.title(APP_NAME)
+        try:
+            if sys.platform == "win32":
+                self.iconbitmap(default=str(resource("icon.ico")))
+            else:
+                self.iconphoto(True, tk.PhotoImage(file=str(resource("icon.png"))))
+        except tk.TclError:
+            pass
+        self.theme = theming.Theme(self, self.settings)
 
         self.watched        = load_watched()
         self.rows           = {}
+        self.status         = {}     # slug -> (in_stock, checked_at, price, note)
         self.notified       = {}
         self.watching       = False
         self.watcher_thread = None
-        self._log_open      = True
-        self._changes_open  = True
         self._wake          = threading.Event()  # interrupts the poll countdown
-        self._prev_status   = {}   # slug -> (in_stock, title, price) for full-store diff
+        self._prev_status   = {}     # slug -> (in_stock, title, price, note), whole store
         self._delisted      = set()  # slugs the store no longer carries
         self._closed        = False  # guards callbacks from worker threads
+        self._log_lines     = deque(maxlen=MAX_LOG_LINES)
+        self._changes       = deque(maxlen=MAX_CHANGE_LINES)
+        self._change_count  = 0
+        self._tab           = "watch"
+        self._bottom_view   = "changes"
+        self._status_text   = ("Idle", "text3")
+        self._countdown     = None
+        self._tray_hint_shown = False
+        self.available_update = None
+        self.update_status  = "Not checked yet."
+        self.update_busy    = False
+        self._update_dismissed = False
+        self._ui_queue      = queue.SimpleQueue()
 
-        self._apply_ttk_styles()
-        self._build()
-        self._refresh_list()
+        self._restore_geometry()
+        self._build_ui()
+        self._load_recent_changes()
 
-        # Auto-start if enabled
-        if self.settings.get("auto_start") and self.watched:
+        self.tray = None
+        if use_tray and traymod.AVAILABLE:
+            self.tray = traymod.TrayIcon(
+                {k: resource(f"tray-{k}.ico") for k in ("idle", "watching", "alert")},
+                APP_NAME, self._tray_menu,
+                on_open=lambda: self._post(self.show_window),
+                on_show=lambda: self._post(self.show_window),
+                on_theme=lambda: self._post(self._on_system_theme),
+                app_icon=resource("icon.ico"))
+            if not self.tray.start():
+                self.tray = None
+        if start_minimized and not self.tray:
+            self.deiconify()
+
+        if (self.settings.get("auto_start") or watch_now) and self.watched:
             self.after(500, self._toggle_watch)
 
-        # Keyboard shortcuts
+        if check_updates and self.settings.get("check_updates") \
+                and updater.install_kind() != "source":
+            self.after(4000, lambda: self.check_for_updates(quiet=True))
+
+        winplatform.refresh_autostart()
+
+        self.after(50, self._drain)
         self.bind("<F5>", lambda _: self._force_check())
         self.bind("<Control-n>", lambda _: self._open_browse())
-
+        self.bind("<Control-Key-1>", lambda _: self._show_tab("watch"))
+        self.bind("<Control-Key-2>", lambda _: self._show_tab("history"))
+        self.bind("<Control-Key-3>", lambda _: self._show_tab("settings"))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-    def _post(self, fn, *args):
-        """Schedule fn on the Tk thread, unless the window has already closed.
+    # ── Thread plumbing ───────────────────────────────────────────────
 
-        The watcher runs on a worker thread; closing the window mid-cycle left
-        it calling after() on a destroyed root, which raises out of a thread
-        with nowhere to report it.
+    def _post(self, fn, *args):
+        """Run fn on the Tk thread soon, unless the window has closed.
+
+        Workers never call Tk themselves. A Tk call from another thread waits
+        for the main loop to pick it up, which polls every 20 ms; a cycle that
+        updated a few dozen widgets that way spent seconds queueing, and a
+        call landing after the window closed raised out of the thread. They
+        put work on this queue instead, and _drain runs it.
         """
+        if not self._closed:
+            self._ui_queue.put((fn, args))
+
+    def _drain(self):
         if self._closed:
             return
+        for _ in range(1000):
+            try:
+                fn, args = self._ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            try:
+                fn(*args)
+            except tk.TclError:
+                if self._closed:
+                    return
+                log.exception("UI update failed")
+            except Exception:
+                log.exception("UI update failed")
         try:
-            self.after(0, fn, *args)
-        except (tk.TclError, RuntimeError):
-            self._closed = True
+            self.after(40, self._drain)
+        except tk.TclError:
+            pass
 
     def destroy(self):
         self._closed = True
         super().destroy()
 
+    # ── Window ────────────────────────────────────────────────────────
+
+    def _restore_geometry(self):
+        S = self.theme.S
+        self.minsize(S(560), S(460))
+        w, h = S(780), S(720)
+        g = self.settings.get("window")
+        if g and winplatform.point_on_screen(g[0] + 40, g[1] + 20):
+            self.geometry(f"{max(g[2], S(560))}x{max(g[3], S(460))}+{g[0]}+{g[1]}")
+        else:
+            x = max(0, (self.winfo_screenwidth() - w) // 2)
+            y = max(0, (self.winfo_screenheight() - h) // 3)
+            self.geometry(f"{w}x{h}+{x}+{y}")
+
+    def _save_geometry(self):
+        try:
+            if self.state() == "normal" and self.winfo_viewable():
+                self.settings["window"] = [self.winfo_x(), self.winfo_y(),
+                                           self.winfo_width(), self.winfo_height()]
+                save_settings(self.settings)
+        except (tk.TclError, OSError):
+            pass
+
+    def show_window(self):
+        self.deiconify()
+        if self.state() == "iconic":
+            self.state("normal")
+        self.lift()
+        self.focus_force()
+        self.attributes("-topmost", True)
+        self.after(150, lambda: self.attributes("-topmost", False))
+
     def _on_close(self):
+        """Closing the window: keep watching in the tray, or quit."""
+        if self.tray and self.settings.get("close_to_tray", True):
+            self._save_geometry()
+            self.withdraw()
+            if not self._tray_hint_shown:
+                self._tray_hint_shown = True
+                self.tray.notify(APP_NAME, "Still running here. "
+                                 + ("It keeps watching. " if self.watching else "")
+                                 + "Right-click the icon to quit.")
+            return
+        self.quit_app()
+
+    def quit_app(self):
         """Stop the watcher and persist buffered history before exiting."""
+        self._save_geometry()
         self.watching = False
         self._wake.set()
         try:
             stock_history.flush()
         except Exception:
             log.exception("Could not flush stock history on exit")
+        if self.tray:
+            self.tray.stop()
+            self.tray = None
         self.destroy()
 
-    def _apply_ttk_styles(self):
-        C = self.C
-        s = ttk.Style(self)
-        s.theme_use("clam")
-        s.configure("Vertical.TScrollbar",
-                    background=C["panel"], troughcolor=C["bg"],
-                    bordercolor=C["bg"], arrowcolor=C["muted"], relief="flat")
-        s.configure("TProgressbar",
-                    background=C["accent"], troughcolor=C["panel"],
-                    bordercolor=C["panel"])
-        s.configure("TNotebook", background=C["bg"], borderwidth=0,
-                    tabmargins=[0, 0, 0, 0])
-        s.configure("TNotebook.Tab",
-                    background=C["panel"], foreground=C["muted"],
-                    padding=[18, 9],
-                    font=(self.settings["font_family"],
-                          self.settings["font_size"], "normal"))
-        s.map("TNotebook.Tab",
-              background=[("selected", C["bg"]), ("active", C["hover"])],
-              foreground=[("selected", C["text"]), ("active", C["text"])])
-        s.configure("TCombobox",
-                    fieldbackground=C["panel"], background=C["panel"],
-                    foreground=C["text"], selectbackground=C["accent"],
-                    bordercolor=C["border"], arrowcolor=C["muted"])
+    def _copy(self, text):
+        self.clipboard_clear()
+        self.clipboard_append(text)
 
-    def _build(self):
-        C        = self.C
-        settings = self.settings
+    # ── Building ──────────────────────────────────────────────────────
 
-        # Top bar
-        topbar = tk.Frame(self, bg=C["panel"])
-        topbar.pack(fill="x")
-        logo = tk.Frame(topbar, bg=C["panel"], pady=14, padx=20)
-        logo.pack(side="left")
-        tk.Label(logo, text="◈", bg=C["panel"], fg=C["accent"],
-                 font=(settings["font_family"], settings["font_size"] + 8)
-                 ).pack(side="left", padx=(0, 8))
-        tk.Label(logo, text="Unifi Stock Watcher",
-                 bg=C["panel"], fg=C["text"],
-                 font=(settings["font_family"], settings["font_size"] + 4, "bold")
-                 ).pack(side="left")
-        tk.Label(logo, text=f"v{__version__}", bg=C["panel"], fg=C["muted"],
-                 font=(settings["font_family"], settings["font_size"] - 2)
-                 ).pack(side="left", padx=(8, 0))
+    def _build_ui(self):
+        T, S = self.theme, self.theme.S
+        T.style_window(self)
 
-        region = settings.get("region", "us")
-        region_label = STORE_REGIONS.get(region, {}).get("label", region.upper())
-        tk.Label(topbar, text=f"Region: {region_label}", bg=C["panel"], fg=C["muted"],
-                 font=(settings["font_family"], settings["font_size"] - 1)
-                 ).pack(side="right", padx=20)
+        header = ttk.Frame(self, padding=(S(20), S(14), S(14), 0))
+        header.pack(fill="x")
+        self._logo = tk.PhotoImage(master=self, data=gfx.bell_icon(S(28), badge=True).png_b64(),
+                                   format="png")
+        ttk.Label(header, image=self._logo).pack(side="left", padx=(0, S(10)))
+        ttk.Label(header, text=APP_NAME, style="Title.TLabel").pack(side="left")
+        menu_btn = ttk.Button(header, text=T.icon("more"), style="Icon.Subtle.TButton",
+                              command=self._app_menu, takefocus=False)
+        menu_btn.pack(side="right")
+        self._menu_btn = menu_btn
+        Tooltip(menu_btn, "More", T)
+        status = ttk.Frame(header)
+        status.pack(side="right", padx=(0, S(10)))
+        self.status_dot = ttk.Label(status, text="●", style="Dot.TLabel")
+        self.status_dot.pack(side="left", padx=(0, S(6)))
+        self.status_lbl = ttk.Label(status, style="Muted.TLabel")
+        self.status_lbl.pack(side="left")
+        self.countdown_lbl = ttk.Label(status, style="Faint.TLabel")
+        self.countdown_lbl.pack(side="left", padx=(S(8), 0))
 
-        tk.Frame(self, bg=C["border"], height=1).pack(fill="x")
+        nav = ttk.Frame(self, padding=(S(14), S(6), S(20), 0))
+        nav.pack(fill="x")
+        self._nav = {}
+        for key, label in (("watch", "Watch list"), ("history", "History"), ("settings", "Settings")):
+            col = ttk.Frame(nav)
+            col.pack(side="left", padx=(S(6), S(10)))
+            lbl = ttk.Label(col, text=label, style="Nav.TLabel", cursor="hand2")
+            lbl.pack()
+            bar = ttk.Frame(col, style="NavBar.TFrame", height=S(3))
+            lbl.bind("<Button-1>", lambda _, k=key: self._show_tab(k))
+            self._nav[key] = (lbl, bar)
+        ttk.Frame(self, style="Divider.TFrame", height=1).pack(fill="x")
 
-        # Tabs
-        self.nb = ttk.Notebook(self)
-        self.nb.pack(fill="both", expand=True)
-
-        self.watcher_tab = tk.Frame(self.nb, bg=C["bg"])
-        self.nb.add(self.watcher_tab, text="  ◉  Watcher  ")
-
-        self.history_tab_frame = tk.Frame(self.nb, bg=C["bg"])
-        self.nb.add(self.history_tab_frame, text="  📊  History  ")
-
-        self.settings_tab_frame = tk.Frame(self.nb, bg=C["bg"])
-        self.nb.add(self.settings_tab_frame, text="  ⚙  Settings  ")
-
+        self.body = ttk.Frame(self)
+        self.body.pack(fill="both", expand=True)
+        self.watcher_tab = ttk.Frame(self.body)
         self._build_watcher_tab()
-        self._build_history_tab()
-        self._build_settings_tab()
+        # History and Settings are built the first time they are shown. Tk
+        # lays out a subtree that has never been mapped slowly on every idle
+        # pass: with Settings built up front, any style change, theme change
+        # or new dialog cost about two seconds.
+        self._history_widget = None
+        self._settings_widget = None
+        self._show_tab(self._tab)
+        self._set_status(*self._status_text)
+        self._set_countdown(self._countdown)
+        if self.watching:
+            # The toolbar is built idle. The watcher thread is still running,
+            # so without this the button reads "Start watching" while
+            # watching, and clicking it would start a second watcher.
+            self.start_btn.config(text="Stop watching", style="TButton")
+        self._refresh_list()
 
-        self.nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+    def _rebuild_ui(self):
+        """Build every widget again from the app's state: a theme, accent or
+        text size change touches nearly everything, and classic Tk widgets
+        (the logs, menus) don't follow ttk styles."""
+        for w in self.winfo_children():
+            if not isinstance(w, tk.Toplevel):
+                w.destroy()
+        self._build_ui()
 
-    def _on_tab_changed(self, event):
-        tab_id = self.nb.index(self.nb.select())
-        if tab_id == 1 and hasattr(self, '_history_widget'):
+    def _show_tab(self, key):
+        self._tab = key
+        if key == "history" and self._history_widget is None:
+            self._history_widget = HistoryTab(self.body, self)
+        if key == "settings" and self._settings_widget is None:
+            self._settings_widget = SettingsTab(self.body, self)
+        frames = {"watch": self.watcher_tab, "history": self._history_widget,
+                  "settings": self._settings_widget}
+        for k, f in frames.items():
+            lbl, bar = self._nav[k]
+            if k == key:
+                f.pack(fill="both", expand=True)
+                lbl.configure(style="NavActive.TLabel")
+                bar.pack(fill="x", padx=self.theme.S(4))
+            else:
+                if f is not None:
+                    f.pack_forget()
+                lbl.configure(style="Nav.TLabel")
+                bar.pack_forget()
+        if key == "history":
             self._history_widget.refresh()
 
     def _build_watcher_tab(self):
-        C        = self.C
-        settings = self.settings
-        p        = self.watcher_tab
-        F = lambda d=0, b=False: (settings["font_family"],
-                                   settings["font_size"] + d,
-                                   "bold" if b else "normal")
+        T, S = self.theme, self.theme.S
+        p = self.watcher_tab
 
-        # Action bar
-        bar = tk.Frame(p, bg=C["bg"], pady=10, padx=16)
+        bar = ttk.Frame(p, padding=(S(20), S(14), S(20), S(8)))
         bar.pack(fill="x")
-        self.start_btn = tk.Button(
-            bar, text="▶  Start Watching", command=self._toggle_watch,
-            bg=C["accent"], fg=C["white"],
-            activebackground=C["accent_h"], activeforeground=C["white"],
-            relief="flat", bd=0, cursor="hand2", font=F(0, True), padx=14, pady=7)
-        self.start_btn.pack(side="left", padx=(0, 8))
-        tooltip(self.start_btn, "Start/stop polling  (F5 = force check)")
+        self.start_btn = ttk.Button(bar, text="Start watching", style="Accent.TButton",
+                                    command=self._toggle_watch)
+        self.start_btn.pack(side="left")
+        Tooltip(self.start_btn, "Check the store on a timer and alert you when a product "
+                                "comes back (F5 checks now)", T)
+        add_btn = ttk.Button(bar, text="Add products…", command=self._open_browse)
+        add_btn.pack(side="left", padx=(S(8), 0))
+        Tooltip(add_btn, "Browse the store's catalog (Ctrl+N)", T)
+        self.force_btn = ttk.Button(bar, text="Check now", command=self._force_check)
+        self.force_btn.pack(side="left", padx=(S(8), 0))
+        Tooltip(self.force_btn, "Check the whole store right now (F5)", T)
+        self.store_lbl = ttk.Label(bar, style="Faint.TLabel")
+        self.store_lbl.pack(side="right")
+        self._update_store_label()
 
-        add_btn = tk.Button(bar, text="+ Add Items", command=self._open_browse,
-                  bg=C["panel"], fg=C["text"],
-                  activebackground=C["hover"], activeforeground=C["text"],
-                  relief="flat", bd=0, cursor="hand2", font=F(), padx=14, pady=7)
-        add_btn.pack(side="left")
-        tooltip(add_btn, "Browse products  (Ctrl+N)")
+        self.banner_holder = ttk.Frame(p, padding=(S(20), 0))
+        self.banner_holder.pack(fill="x")
+        self._build_banner()
 
-        self.force_btn = tk.Button(
-            bar, text="⟳ Check Now", command=self._force_check,
-            bg=C["panel"], fg=C["text"],
-            activebackground=C["hover"], activeforeground=C["text"],
-            relief="flat", bd=0, cursor="hand2", font=F(-1), padx=10, pady=5)
-        self.force_btn.pack(side="left", padx=(8, 0))
-        tooltip(self.force_btn, "Force immediate check  (F5)")
+        self.paned = ttk.Panedwindow(p, orient="vertical")
+        self.paned.pack(fill="both", expand=True, padx=S(20), pady=(S(4), S(16)))
+        self.list_scroll = ScrollFrame(self.paned, T)
+        self.list_canvas = self.list_scroll.canvas
+        self.list_frame = self.list_scroll.inner
+        self.paned.add(self.list_scroll, weight=1)
 
-        # Status bar
-        sbar = tk.Frame(p, bg=C["bg"], pady=6, padx=16)
-        sbar.pack(fill="x")
-        self.status_dot = tk.Label(sbar, text="●", bg=C["bg"], fg=C["muted"], font=F(2))
-        self.status_dot.pack(side="left", padx=(0, 6))
-        self.status_lbl = tk.Label(sbar, text="Idle", bg=C["bg"], fg=C["muted"], font=F(-1))
-        self.status_lbl.pack(side="left")
-        self.countdown_lbl = tk.Label(sbar, text="", bg=C["bg"], fg=C["muted"], font=F(-1))
-        self.countdown_lbl.pack(side="right")
+        panel = ttk.Frame(self.paned, style="Tile.TFrame", padding=S(1))
+        self.paned.add(panel, weight=0)
+        inner = ttk.Frame(panel, style="Card.TFrame", padding=(S(10), S(6), S(10), S(8)))
+        inner.pack(fill="both", expand=True, padx=S(2), pady=S(2))
+        head = ttk.Frame(inner, style="Card.TFrame")
+        head.pack(fill="x")
+        self._seg = {}
+        for key, label in (("changes", "Store changes"), ("activity", "Activity")):
+            b = ttk.Button(head, text=label, command=lambda k=key: self._set_bottom(k),
+                           takefocus=False)
+            b.pack(side="left", padx=(0, S(4)))
+            self._seg[key] = b
+        self._changes_count_lbl = ttk.Label(head, style="Card.Faint.TLabel")
+        self._changes_count_lbl.pack(side="left", padx=(S(6), 0))
+        ttk.Button(head, text="Clear", style="Card.Subtle.TButton",
+                   command=self._clear_bottom, takefocus=False).pack(side="right")
+        body = ttk.Frame(inner, style="Card.TFrame")
+        body.pack(fill="both", expand=True, pady=(S(6), 0))
+        mono = ("Cascadia Mono", T.size - 1) if "Cascadia Mono" in T.root.tk.call("font", "families") \
+            else ("Consolas", T.size - 1)
+        self.log_text = tk.Text(body, height=7, font=mono, state="disabled", wrap="none",
+                                padx=S(4), pady=S(2), **T.text_widget_colours())
+        self.changes_text = self.log_text      # one widget, two views
+        sb = ttk.Scrollbar(body, orient="vertical", command=self.log_text.yview,
+                           style="Card.Vertical.TScrollbar")
+        self.log_text.configure(yscrollcommand=sb.set)
+        sb.pack(side="right", fill="y")
+        self.log_text.pack(side="left", fill="both", expand=True)
+        c = T.c
+        for tag, colour in (("ok", c["green"]), ("warn", c["amber"]), ("err", c["red"]),
+                            ("fav", c["gold"]), ("info", c["text2"]), ("time", c["text3"]),
+                            ("in_stock", c["green"]), ("oos", c["red"]),
+                            ("name", c["text"]), ("price", c["text2"])):
+            self.log_text.tag_config(tag, foreground=colour)
+        self._render_bottom()
+        self._sash_placed = False
+        self.paned.bind("<Configure>", lambda _: self._sash_placed or self._place_sash())
 
-        tk.Frame(p, bg=C["border"], height=1).pack(fill="x")
+    def _place_sash(self):
+        """Give the changes panel its height once the window has its size:
+        on the first <Configure>, before anything is drawn."""
+        try:
+            h = self.paned.winfo_height()
+            if h > self.theme.S(300):
+                self.paned.sashpos(0, h - self.theme.S(190))
+                self._sash_placed = True
+        except tk.TclError:
+            pass
 
-        # Scrollable watched list
-        list_outer = tk.Frame(p, bg=C["bg"])
-        list_outer.pack(fill="both", expand=True, padx=10, pady=8)
-        self.list_canvas = tk.Canvas(list_outer, bg=C["bg"], highlightthickness=0, bd=0)
-        list_sb = tk.Scrollbar(list_outer, orient="vertical",
-                               command=self.list_canvas.yview,
-                               bg=C["panel"], troughcolor=C["bg"], relief="flat", width=10)
-        self.list_canvas.configure(yscrollcommand=list_sb.set)
-        list_sb.pack(side="right", fill="y")
-        self.list_canvas.pack(side="left", fill="both", expand=True)
-        self.list_frame = tk.Frame(self.list_canvas, bg=C["bg"])
-        self._lcw = self.list_canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
-        self.list_frame.bind("<Configure>",
-            lambda e: self.list_canvas.configure(scrollregion=self.list_canvas.bbox("all")))
-        self.list_canvas.bind("<Configure>",
-            lambda e: self.list_canvas.itemconfig(self._lcw, width=e.width))
-        bind_wheel(self.list_canvas, self.list_frame)
+    def _build_banner(self):
+        for w in self.banner_holder.winfo_children():
+            w.destroy()
+        u = self.available_update
+        if not u or self._update_dismissed:
+            self.banner_holder.configure(padding=0)
+            return
+        S = self.theme.S
+        self.banner_holder.configure(padding=(S(20), 0, S(20), S(8)))
+        b = ttk.Frame(self.banner_holder, style="Banner.TFrame", padding=(S(14), S(8)))
+        b.pack(fill="x")
+        text = (f"Version {u.version} is available." if u.can_install
+                else f"Version {u.version} is out: update with git pull.")
+        if self.update_busy:
+            text = self.update_status
+        ttk.Label(b, text=text, style="Banner.TLabel").pack(side="left")
+        ttk.Button(b, text=self.theme.icon("close"), style="Banner.Icon.Subtle.TButton",
+                   command=self._dismiss_banner, takefocus=False).pack(side="right")
+        ttk.Button(b, text="What's new", style="Banner.TButton",
+                   command=lambda: webbrowser.open(f"{updater.RELEASES_URL}/tag/v{u.version}"),
+                   takefocus=False).pack(side="right", padx=(S(8), S(4)))
+        if u.can_install:
+            ttk.Button(b, text="Install and restart", style="Banner.Accent.TButton",
+                       command=self.install_update,
+                       state="disabled" if self.update_busy else "normal").pack(side="right")
 
-        tk.Frame(p, bg=C["border"], height=1).pack(fill="x")
+    def _dismiss_banner(self):
+        self._update_dismissed = True
+        self._build_banner()
 
-        # ── Collapsible Stock Changes feed ────────────────────────────
-        self._changes_open = True
-        changes_section = tk.Frame(p, bg=C["bg"])
-        changes_section.pack(fill="x")
+    def _update_store_label(self):
+        region = self.settings.get("region", "us")
+        self.store_lbl.config(text=f"{STORE_REGIONS[region]['label']} store  ·  "
+                                   f"every {interval_label(self.settings['poll_interval'])}")
 
-        changes_hdr = tk.Frame(changes_section, bg=C["bg"], pady=7, padx=16)
-        changes_hdr.pack(fill="x")
-        self._changes_arrow = tk.Label(
-            changes_hdr, text="▾  STOCK CHANGES",
-            bg=C["bg"], fg=C["muted"], font=F(-2, True), cursor="hand2")
-        self._changes_arrow.pack(side="left")
-        self._changes_arrow.bind("<Button-1>", lambda _: self._toggle_changes())
-        changes_hdr.bind("<Button-1>", lambda _: self._toggle_changes())
+    # ── Settings ──────────────────────────────────────────────────────
 
-        self._changes_count_lbl = tk.Label(
-            changes_hdr, text="", bg=C["bg"], fg=C["muted"], font=F(-2))
-        self._changes_count_lbl.pack(side="left", padx=(8, 0))
-
-        tk.Button(changes_hdr, text="Clear", command=self._clear_changes,
-                  bg=C["panel"], fg=C["muted"], relief="flat", bd=0,
-                  cursor="hand2", font=F(-2), padx=10, pady=3,
-                  activebackground=C["hover"]).pack(side="right")
-
-        self.changes_body = tk.Frame(changes_section, bg=C["bg"])
-        self.changes_body.pack(fill="x", padx=10, pady=(0, 8))
-        changes_sb = tk.Scrollbar(self.changes_body, bg=C["panel"],
-                                  troughcolor=C["bg"], relief="flat", width=8)
-        changes_sb.pack(side="right", fill="y")
-        self.changes_text = tk.Text(
-            self.changes_body, height=5, bg=C["panel"], fg=C["muted"],
-            font=("Consolas", max(8, settings["font_size"] - 2)),
-            relief="flat", bd=0, state="disabled", wrap="word",
-            yscrollcommand=changes_sb.set, highlightthickness=0)
-        self.changes_text.pack(side="left", fill="x", expand=True)
-        changes_sb.config(command=self.changes_text.yview)
-        self.changes_text.tag_config("in_stock",  foreground=C["green"])
-        self.changes_text.tag_config("oos",       foreground=C["red"])
-        self.changes_text.tag_config("time",      foreground="#444d56")
-        self.changes_text.tag_config("arrow_up",  foreground=C["green"])
-        self.changes_text.tag_config("arrow_down", foreground=C["red"])
-        self.changes_text.tag_config("price",     foreground=C["gold"])
-        self.changes_text.tag_config("name",      foreground=C["text"])
-        self._change_count = 0
-
-        tk.Frame(p, bg=C["border"], height=1).pack(fill="x")
-
-        # Collapsible log
-        self._log_open = True
-        log_section = tk.Frame(p, bg=C["bg"])
-        log_section.pack(fill="x")
-        log_hdr = tk.Frame(log_section, bg=C["bg"], pady=7, padx=16)
-        log_hdr.pack(fill="x")
-        self._log_arrow = tk.Label(log_hdr, text="▾  ACTIVITY LOG",
-                                   bg=C["bg"], fg=C["muted"],
-                                   font=F(-2, True), cursor="hand2")
-        self._log_arrow.pack(side="left")
-        self._log_arrow.bind("<Button-1>", lambda _: self._toggle_log())
-        log_hdr.bind("<Button-1>", lambda _: self._toggle_log())
-        tk.Button(log_hdr, text="Clear", command=self._clear_log,
-                  bg=C["panel"], fg=C["muted"], relief="flat", bd=0,
-                  cursor="hand2", font=F(-2), padx=10, pady=3,
-                  activebackground=C["hover"]).pack(side="right")
-
-        self.log_body = tk.Frame(log_section, bg=C["bg"])
-        self.log_body.pack(fill="x", padx=10, pady=(0, 8))
-        log_sb2 = tk.Scrollbar(self.log_body, bg=C["panel"],
-                               troughcolor=C["bg"], relief="flat", width=8)
-        log_sb2.pack(side="right", fill="y")
-        self.log_text = tk.Text(
-            self.log_body, height=6, bg=C["panel"], fg=C["muted"],
-            font=("Consolas", max(8, settings["font_size"] - 2)),
-            relief="flat", bd=0, state="disabled", wrap="word",
-            yscrollcommand=log_sb2.set, highlightthickness=0)
-        self.log_text.pack(side="left", fill="x", expand=True)
-        log_sb2.config(command=self.log_text.yview)
-        self.log_text.tag_config("ok",   foreground=C["green"])
-        self.log_text.tag_config("warn", foreground=C["yellow"])
-        self.log_text.tag_config("err",  foreground=C["red"])
-        self.log_text.tag_config("fav",  foreground=C["gold"])
-        self.log_text.tag_config("info", foreground=C["muted"])
-        self.log_text.tag_config("time", foreground="#444d56")
-
-        # Bottom toolbar
-        tk.Frame(p, bg=C["border"], height=1).pack(fill="x")
-        bottom = tk.Frame(p, bg=C["panel"], pady=7, padx=16)
-        bottom.pack(fill="x")
-        tk.Button(bottom, text="Test Notification", command=self._test_notif,
-                  bg=C["panel"], fg=C["muted"], relief="flat", bd=0,
-                  cursor="hand2", font=F(-1), padx=10, pady=3,
-                  activebackground=C["hover"]).pack(side="left", padx=(0, 8))
-        tk.Button(bottom, text="Open Store", command=self._open_store,
-                  bg=C["panel"], fg=C["muted"], relief="flat", bd=0,
-                  cursor="hand2", font=F(-1), padx=10, pady=3,
-                  activebackground=C["hover"]).pack(side="left")
-        interval = self.settings.get("poll_interval", 60)
-        tk.Label(bottom, text=f"Interval: {interval}s",
-                 bg=C["panel"], fg=C["muted"], font=F(-2)).pack(side="right")
-
-    def _build_history_tab(self):
-        for w in self.history_tab_frame.winfo_children(): w.destroy()
-        self._history_widget = HistoryTab(self.history_tab_frame, self.C, self.settings)
-        self._history_widget.pack(fill="both", expand=True)
-
-    def _build_settings_tab(self):
-        for w in self.settings_tab_frame.winfo_children(): w.destroy()
-        st = SettingsTab(self.settings_tab_frame, self.settings, self._on_settings_apply)
-        st.pack(fill="both", expand=True)
+    def set_setting(self, key, value):
+        """Change one setting: save it, and make it take effect."""
+        if self.settings.get(key) == value:
+            return
+        new = dict(self.settings)
+        new[key] = value
+        self._on_settings_apply(new)
 
     def _on_settings_apply(self, new_settings):
-        old_region = self.settings.get("region", "us")
-        self.settings = new_settings
-        self.C = build_palette(new_settings)
-        self.configure(bg=self.C["bg"])
-        for widget in self.winfo_children(): widget.destroy()
-        self._apply_ttk_styles()
-        self._build()
-        self.watched = load_watched()
-        self._refresh_list()
+        old = self.settings
+        self.settings = dict(new_settings)
+        save_settings(self.settings)
+        if old.get("region", "us") != self.settings.get("region", "us"):
+            self._on_region_changed(old.get("region", "us"), self.settings.get("region", "us"))
+        if any(old.get(k) != self.settings.get(k) for k in ("theme", "accent", "font_size")):
+            self._retheme()
+        else:
+            self._update_store_label()
 
-        # _build() recreates the action bar in its idle state. The watcher
-        # thread is still running, so without this the button reads
-        # "Start Watching" while watching, and clicking it stops the watcher.
-        if self.watching:
-            self.start_btn.config(text="⏹  Stop Watching", bg=self.C["red"])
-            self._set_status("Watching…", self.C["green"])
+    def _retheme(self):
+        self.theme.apply(self.settings)
+        # ttk handles a style change in an idle callback; widgets built before
+        # it has run can be left undrawn. Let it run first.
+        self.update_idletasks()
+        self._rebuild_ui()
 
-        if new_settings.get("region", "us") != old_region:
-            self._on_region_changed(old_region, new_settings.get("region", "us"))
-
-        self._log("Settings applied.", "ok")
+    def _on_system_theme(self):
+        if self.settings.get("theme") == "system" or not self.settings.get("accent"):
+            self._retheme()
 
     def _on_region_changed(self, old, new):
         """Drop state that only made sense for the previous store."""
@@ -1363,68 +1477,87 @@ class UnifiWatcherApp(tk.Tk):
         self._prev_status = {}
         self.notified.clear()
         self._delisted.clear()      # a slug absent from one store may exist in another
+        self.status.clear()
         invalidate_build_id()
-        self._log(f"Region {old.upper()} → {new.upper()}: baseline reset.", "warn")
+        self._refresh_list()
+        self._log(f"Store changed from {STORE_REGIONS[old]['label']} to "
+                  f"{STORE_REGIONS[new]['label']}: starting a new baseline.", "warn")
+
+    def _set_autostart(self, enabled):
+        if not winplatform.set_autostart(enabled):
+            messagebox.showerror(APP_NAME, "Couldn't change Start with Windows. "
+                                 "See the log for details.", parent=self)
+        self._log("Starts with Windows." if enabled else "Doesn't start with Windows any more.", "info")
 
     # ── List rendering ────────────────────────────────────────────────
 
     def _refresh_list(self):
-        for w in self.list_frame.winfo_children(): w.destroy()
+        for w in self.list_frame.winfo_children():
+            w.destroy()
         self.rows = {}
-        C = self.C
-
-        favourites = [i for i in self.watched if i.get("favourite")]
-        others     = [i for i in self.watched if not i.get("favourite")]
+        S = self.theme.S
 
         if not self.watched:
-            tk.Label(self.list_frame,
-                     text='No items watched yet.\nClick "+ Add Items" to browse products.\n\nCtrl+N = browse   F5 = force check',
-                     bg=C["bg"], fg=C["muted"],
-                     font=(self.settings["font_family"], self.settings["font_size"]),
-                     justify="center", pady=40).pack(fill="x")
+            empty = ttk.Frame(self.list_frame, padding=(0, S(60)))
+            empty.pack(fill="x")
+            ttk.Label(empty, text="Nothing on your watch list yet", style="Heading.TLabel").pack()
+            ttk.Label(empty, style="Muted.TLabel", justify="center",
+                      text="Add the products you want, and you'll hear the moment\n"
+                           "one comes back in stock.").pack(pady=(S(6), S(14)))
+            ttk.Button(empty, text="Add products…", style="Accent.TButton",
+                       command=self._open_browse).pack()
             self._update_title()
             return
 
-        if favourites:
-            SectionHeader(self.list_frame, f"★  FAVOURITES ({len(favourites)})",
-                          C, self.settings).pack(fill="x")
-            for item in favourites:
-                row = WatchedRow(self.list_frame, item,
-                                 self._remove_item, self._toggle_fav,
-                                 self._quick_check_item, C, self.settings)
-                row.pack(fill="x", pady=(0, 4))
-                self.rows[item["slug"]] = row
-
-        if others:
-            SectionHeader(self.list_frame, f"MONITORING ({len(others)})",
-                          C, self.settings).pack(fill="x", pady=(12 if favourites else 0, 0))
-            for item in others:
-                row = WatchedRow(self.list_frame, item,
-                                 self._remove_item, self._toggle_fav,
-                                 self._quick_check_item, C, self.settings)
-                row.pack(fill="x", pady=(0, 4))
+        favourites = [i for i in self.watched if i.get("favourite")]
+        others     = [i for i in self.watched if not i.get("favourite")]
+        for title, items, top in (("Favourites", favourites, 0),
+                                  ("Watching", others, S(14) if favourites else 0)):
+            if not items:
+                continue
+            ttk.Label(self.list_frame, text=f"{title.upper()}  ·  {len(items)}",
+                      style="Caps.TLabel").pack(fill="x", pady=(top, S(6)))
+            for item in items:
+                row = WatchedRow(self.list_frame, self, item)
+                # Status first, then pack: a row that changes size after it is
+                # on screen leaves its old outline to be repainted.
+                if item["slug"] in self._delisted:
+                    row.mark_delisted()
+                elif item["slug"] in self.status:
+                    row.update_status(*self.status[item["slug"]])
+                row.pack(fill="x", pady=(0, S(6)))
                 self.rows[item["slug"]] = row
 
         self.notified = {w["slug"]: self.notified.get(w["slug"], False) for w in self.watched}
         self._update_title()
 
     def _update_title(self):
-        n_fav   = sum(1 for i in self.watched if i.get("favourite"))
-        n_total = len(self.watched)
-        self.title(f"Unifi Stock Watcher — {n_total} item(s), {n_fav} ★"
-                   if n_total else "Unifi Stock Watcher")
+        n_in = sum(1 for s in self.status.values() if s[0])
+        self.title(f"{APP_NAME}  ·  {n_in} in stock" if n_in else APP_NAME)
+        self._update_tray()
+
+    def _update_tray(self):
+        if not getattr(self, "tray", None):
+            return
+        n_in = sum(1 for slug, s in self.status.items() if s[0] and slug in self.rows)
+        state = "alert" if n_in else ("watching" if self.watching else "idle")
+        n = len(self.watched)
+        tip = (f"{APP_NAME}: watching {n} product{'s' if n != 1 else ''}" if self.watching
+               else f"{APP_NAME}: not watching")
+        if n_in:
+            tip += f", {n_in} in stock"
+        self.tray.set_state(state, tip)
 
     # ── Item actions ──────────────────────────────────────────────────
 
     def _remove_item(self, item):
         self.watched = [w for w in self.watched if w["slug"] != item["slug"]]
+        self.status.pop(item["slug"], None)
         save_watched(self.watched)
         self._refresh_list()
-        self._log(f"Removed: {item['title']}", "warn")
+        self._log(f"Removed {item['title']}", "warn")
 
     def _toggle_fav(self, item):
-        prev_statuses = {s: r.in_stock for s, r in self.rows.items()}
-        prev_subs     = {s: r.sub.cget("text") for s, r in self.rows.items()}
         is_fav = False
         for w in self.watched:
             if w["slug"] == item["slug"]:
@@ -1433,86 +1566,87 @@ class UnifiWatcherApp(tk.Tk):
                 break
         save_watched(self.watched)
         self._refresh_list()
-        for slug, in_stock in prev_statuses.items():
-            row = self.rows.get(slug)
-            if row and in_stock is not None:
-                checked = prev_subs.get(slug, "").replace("Checked ", "")
-                row.update_status(in_stock, checked or None)
-        self._log(f"{'★' if is_fav else '☆'} {item['title']} "
-                  f"{'starred' if is_fav else 'unstarred'}",
+        self._log(f"{item['title']} {'added to' if is_fav else 'removed from'} favourites",
                   "fav" if is_fav else "info")
 
     def _quick_check_item(self, item):
-        self._log(f"Quick-checking {item['title']}…", "info")
+        self._log(f"Checking {item['title']}…", "info")
+
         def run():
             try:
                 region   = self.settings.get("region", "us")
                 build_id = get_build_id(region)
                 in_stock, price = check_slug(build_id, item["slug"], region)
                 note = None
-                checked  = datetime.now().strftime("%H:%M:%S")
-                stock_history.record_check(item["slug"], item["title"], in_stock, price)
-                self._post( self._update_row, item["slug"], in_stock, checked, price, note)
-                # Check for transition
+                checked  = datetime.now().strftime("%H:%M")
+                stock_history.record(item["slug"], item["title"], in_stock, price)
+                self._post(self._update_row, item["slug"], in_stock, checked, price, note)
                 prev = self._prev_status.get(item["slug"])
                 if prev is not None and prev[0] != in_stock:
-                    self._post( self._add_change, item["title"], in_stock, price)
+                    self._post(self._add_change, item["title"], in_stock, price)
                 self._prev_status[item["slug"]] = (in_stock, item["title"], price, note)
-                if in_stock and not self.notified.get(item["slug"]):
-                    self._post( self._on_in_stock, item)
-                elif not in_stock:
-                    self.notified[item["slug"]] = False
+                self._maybe_alert(item, in_stock)
             except ProductNotFound:
                 self._delisted.add(item["slug"])
-                self._post( self._mark_delisted, item["slug"], item["title"])
+                self._post(self._mark_delisted, item["slug"], item["title"])
             except Exception as e:
                 log.exception("Quick-check failed for %s", item["slug"])
-                self._post( self._log, f"Quick-check failed: {e}", "err")
-        threading.Thread(target=run, daemon=True).start()
+                self._post(self._log, f"Couldn't check {item['title']}: {e}", "err")
+        threading.Thread(target=run, daemon=True, name="unifi-quick").start()
 
     def _open_browse(self):
-        BrowseDialog(self, self.watched, self._add_items, self.C, self.settings)
+        BrowseDialog(self, self.watched, self._add_items)
 
     def _add_items(self, picks):
         existing = {w["slug"] for w in self.watched}
-        added = sum(1 for p in picks if p["slug"] not in existing)
-        for p in picks:
-            if p["slug"] not in existing:
-                self.watched.append(p)
+        added = [p for p in picks if p["slug"] not in existing]
+        self.watched.extend(added)
         save_watched(self.watched)
         self._refresh_list()
-        self._log(f"Added {added} item(s).", "ok")
+        self._log(f"Added {len(added)} product(s) to the watch list.", "ok")
+        if added and self.watching:
+            self._force_check()
 
     # ── Watcher loop ──────────────────────────────────────────────────
 
     def _toggle_watch(self):
         if self.watching:
             self.watching = False
-            self._wake.set()        # cut the countdown short rather than
-                                    # waiting out the current 1s sleep tick
-            self.start_btn.config(text="▶  Start Watching", bg=self.C["accent"])
-            self.countdown_lbl.config(text="")
-            self._set_status("Idle", self.C["muted"])
-            self._log("Watcher stopped.", "warn")
+            self._wake.set()        # cut the countdown short
+            self.start_btn.config(text="Start watching", style="Accent.TButton")
+            self._set_countdown(None)
+            self._set_status("Idle", "text3")
+            self._log("Stopped watching.", "warn")
         else:
             if self.watcher_thread and self.watcher_thread.is_alive():
                 return              # previous loop still winding down
             if not self.watched:
-                messagebox.showinfo("No items", 'Add items first using "+ Add Items".')
+                messagebox.showinfo(APP_NAME, "Add some products to watch first.", parent=self)
                 return
             self.watching = True
             self._wake.clear()
-            self.start_btn.config(text="⏹  Stop Watching", bg=self.C["red"])
-            self._set_status("Watching…", self.C["green"])
-            self._log(f"Started — watching {len(self.watched)} item(s).", "ok")
+            self.start_btn.config(text="Stop watching", style="TButton")
+            self._set_status("Watching", "green")
+            self._log(f"Watching {len(self.watched)} product(s).", "ok")
             self.watcher_thread = threading.Thread(
                 target=self._watch_loop, daemon=True, name="unifi-watch")
             self.watcher_thread.start()
+        self._update_tray()
 
     def _force_check(self):
         if self.watching:
             self._wake.set()
-            self._log("Forcing immediate check…", "info")
+            self._log("Checking now…", "info")
+        elif not (self.watcher_thread and self.watcher_thread.is_alive()):
+            # Not watching: one check, then back to idle.
+            self._log("Checking once…", "info")
+            self.watcher_thread = threading.Thread(
+                target=self._check_once, daemon=True, name="unifi-watch-once")
+            self.watcher_thread.start()
+
+    def _check_once(self):
+        self._cycle()
+        self._post(self._set_status, "Idle", "text3")
 
     def _check_store_layout(self):
         """Once a day, notice categories the store has added and adopt them.
@@ -1529,113 +1663,101 @@ class UnifiWatcherApp(tk.Tk):
             return
         for cat in adopted:
             self._post(self._log,
-                       f"Store added a category — now also watching {cat}", "warn")
+                       f"The store added a category; now also watching {cat}", "warn")
 
     def _watch_loop(self):
-        self._check_store_layout()
         while self.watching:
             # Consume any pending wake here, at the start of the work, rather
             # than at the start of the countdown. Clearing it later would
-            # discard a Check Now pressed *during* the fetch - the same defect
-            # the old _force_flag had.
+            # discard a Check Now pressed *during* the fetch.
             self._wake.clear()
-            self._post( self._set_status, "Checking…", self.C["yellow"])
-            self._post( self._log, "Fetching full store catalog…", "info")
-            region = self.settings.get("region", "us")
-            try:
-                build_id = get_build_id(region)
-
-                # ── Full catalog fetch ────────────────────────────────
-                all_products = fetch_all_products(build_id, region)
-                checked = datetime.now().strftime("%H:%M:%S")
-
-                # slug -> (in_stock, title, price, restock note)
-                current_status = {}
-                for p in all_products:
-                    slug = p.get("slug")
-                    if not slug:
-                        continue
-                    avail = is_available(p)
-                    price = get_price(p)
-                    title = p.get("title", slug)
-                    current_status[slug] = (avail, title, price, restock_note(p))
-
-                # ── Diff against previous state for stock changes feed ─
-                if self._prev_status:
-                    changes = 0
-                    for slug, (now_avail, title, price, _) in current_status.items():
-                        prev = self._prev_status.get(slug)
-                        if prev is not None:
-                            was_avail = prev[0]
-                            if was_avail != now_avail:
-                                changes += 1
-                                self._post( self._add_change,
-                                           title, now_avail, price)
-                    if changes:
-                        self._post( self._log,
-                                   f"Detected {changes} stock change(s) across store.",
-                                   "warn")
-                    else:
-                        self._post( self._log,
-                                   f"No stock changes across {len(current_status)} products.",
-                                   "info")
-                else:
-                    self._post( self._log,
-                               f"Baseline set: {len(current_status)} products cataloged.",
-                               "info")
-
-                # Save current as previous for next cycle
-                self._prev_status = current_status
-
-                # ── Update watched item rows + notifications ──────────
-                for item in list(self.watched):
-                    if not self.watching:
-                        break
-                    slug, title = item["slug"], item["title"]
-                    if slug in self._delisted:
-                        continue
-                    status_entry = current_status.get(slug)
-                    if status_entry:
-                        in_stock, _, price, note = status_entry
-                    else:
-                        # Not in the catalog: either genuinely delisted, or a
-                        # product the category pages do not carry. Ask directly.
-                        note = None
-                        try:
-                            in_stock, price = check_slug(
-                                build_id, slug, region,
-                                retries=self.settings.get("max_retries", 3))
-                        except ProductNotFound:
-                            # Report once, then stop re-checking it every cycle.
-                            self._delisted.add(slug)
-                            self._post( self._mark_delisted, slug, title)
-                            continue
-                        except StoreError as e:
-                            self._post( self._log,
-                                       f"Could not check {title}: {e}", "err")
-                            continue
-
-                    stock_history.record_check(slug, title, in_stock, price)
-                    self._post( self._update_row, slug, in_stock, checked, price, note)
-
-                    if in_stock and not self.notified.get(slug):
-                        self._post( self._on_in_stock, item)
-                    elif not in_stock:
-                        self.notified[slug] = False
-
-            except Exception as e:
-                self._post( self._log, f"Store error: {e}", "err")
-
+            self._cycle()
             if self.watching:
-                self._post( self._set_status, "Watching…", self.C["green"])
+                self._post(self._set_status, "Watching", "green")
                 self._wait_for_next_cycle(self.settings.get("poll_interval", 60))
+
+    def _cycle(self):
+        """One check of the whole store: diff it, update the watched rows."""
+        self._post(self._set_status, "Checking…", "amber")
+        region = self.settings.get("region", "us")
+        # At most once a day (category_cache.json says when), so a watcher
+        # left running for weeks still notices a new store category.
+        self._check_store_layout()
+        try:
+            build_id = get_build_id(region)
+            all_products = fetch_all_products(build_id, region)
+            checked = datetime.now().strftime("%H:%M")
+            watched_slugs = {w["slug"] for w in self.watched}
+
+            current_status = {}      # slug -> (in_stock, title, price, note)
+            for p in all_products:
+                slug = p.get("slug")
+                if slug:
+                    current_status[slug] = (is_available(p), p.get("title", slug),
+                                            get_price(p), restock_note(p))
+
+            if self._prev_status:
+                changes = 0
+                for slug, (now_avail, title, price, _) in current_status.items():
+                    prev = self._prev_status.get(slug)
+                    if prev is not None and prev[0] != now_avail:
+                        changes += 1
+                        self._post(self._add_change, title, now_avail, price)
+                        if slug not in watched_slugs:
+                            stock_history.record(slug, title, now_avail, price, watched=False)
+                self._post(self._log,
+                           f"{changes} stock change(s) across the store." if changes else
+                           f"No changes across {len(current_status)} products.",
+                           "warn" if changes else "info")
+            else:
+                self._post(self._log, f"Baseline: {len(current_status)} products in the catalog.",
+                           "info")
+            self._prev_status = current_status
+
+            for item in list(self.watched):
+                if self._closed:
+                    break
+                slug, title = item["slug"], item["title"]
+                if slug in self._delisted:
+                    continue
+                entry = current_status.get(slug)
+                if entry:
+                    in_stock, _, price, note = entry
+                else:
+                    # Not in the catalog: either genuinely delisted, or a
+                    # product the category pages do not carry. Ask directly.
+                    note = None
+                    try:
+                        in_stock, price = check_slug(
+                            build_id, slug, region,
+                            retries=self.settings.get("max_retries", 3))
+                    except ProductNotFound:
+                        self._delisted.add(slug)
+                        self._post(self._mark_delisted, slug, title)
+                        continue
+                    except StoreError as e:
+                        self._post(self._log, f"Couldn't check {title}: {e}", "err")
+                        continue
+                stock_history.record(slug, title, in_stock, price)
+                self._post(self._update_row, slug, in_stock, checked, price, note)
+                self._maybe_alert(item, in_stock)
+            stock_history.flush()
+        except Exception as e:
+            log.warning("Store check failed: %s", e)
+            self._post(self._log, f"Couldn't reach the store: {e}", "err")
+
+    def _maybe_alert(self, item, in_stock):
+        """Alert once per return to stock. Marked here, on the worker, so a
+        quick check and a cycle finding it together alert once, not twice."""
+        slug = item["slug"]
+        if in_stock and not self.notified.get(slug):
+            self.notified[slug] = True
+            self._post(self._on_in_stock, item)
+        elif not in_stock:
+            self.notified[slug] = False
 
     def _wait_for_next_cycle(self, interval):
         """Count down to the next poll, waking immediately on stop or F5.
-
-        An Event rather than sleep(1) in a loop: Stop and Check Now used to
-        take up to a full second to register, and a force-check raised during
-        the fetch itself was cleared before the countdown ever saw it.
 
         The event is deliberately *not* cleared here - _watch_loop clears it
         when a cycle begins, so a wake raised while that cycle was running is
@@ -1646,133 +1768,369 @@ class UnifiWatcherApp(tk.Tk):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
-            self._post( self._set_countdown, int(remaining) + 1)
+            self._post(self._set_countdown, int(remaining) + 1)
             if self._wake.wait(min(1.0, remaining)):
                 break
-        self._post( self._set_countdown, None)
+        self._post(self._set_countdown, None)
 
     def _set_countdown(self, seconds):
-        self.countdown_lbl.config(
-            text="" if seconds is None else f"Next check in {seconds}s")
+        self._countdown = seconds
+        if seconds is None:
+            text = ""
+        elif seconds >= 120:
+            text = f"next check in {seconds // 60} min"
+        else:
+            text = f"next check in {seconds} s"
+        try:
+            self.countdown_lbl.config(text=text)
+        except tk.TclError:
+            pass
 
     def _mark_delisted(self, slug, title):
         row = self.rows.get(slug)
         if row:
             row.mark_delisted()
-        self._log(f"{title} is no longer listed on the store — skipping.", "warn")
+        self._log(f"{title} is no longer on the store; skipping it.", "warn")
 
     def _update_row(self, slug, in_stock, checked_at, price=None, note=None):
+        self.status[slug] = (in_stock, checked_at, price, note)
         row = self.rows.get(slug)
-        if row: row.update_status(in_stock, checked_at, price, note)
+        if row:
+            row.update_status(in_stock, checked_at, price, note)
         title = next((w["title"] for w in self.watched if w["slug"] == slug), slug)
-        tag = "ok" if in_stock else "info"
         price_text = f" ({price})" if price else ""
-        self._log(f"{title}: {'IN STOCK' if in_stock else 'out of stock'}{price_text}", tag)
+        self._log(f"{title}: {'in stock' if in_stock else 'sold out'}{price_text}",
+                  "ok" if in_stock else "info")
+        self._update_title()
 
     def _on_in_stock(self, item):
         self.notified[item["slug"]] = True
         is_fav = item.get("favourite", False)
         region = self.settings.get("region", "us")
-        self._log(f"{'★ ' if is_fav else ''}IN STOCK: {item['title']}", "ok")
-        notify_windows(
-            f"{'★ ' if is_fav else ''}IN STOCK: {item['title']}",
-            f"{item['title']} is now available on the Unifi store!")
+        url = product_url(item["slug"], region)
+        self._log(f"{'★ ' if is_fav else ''}In stock: {item['title']}", "ok")
+        stock_history.record_alert()
+        if self.settings.get("notifications", True):
+            self._notify(f"{'★ ' if is_fav else ''}Back in stock: {item['title']}",
+                         f"{item['title']} is available on the {STORE_REGIONS[region]['label']} "
+                         "store. Click to open it.", url)
         if self.settings.get("sound_alerts", True):
             play_sound()
         if self.settings.get("auto_open_url", True):
-            webbrowser.open(f"{store_home(region)}/products/{item['slug']}")
+            webbrowser.open(url)
 
-    # ── Stock changes helpers ─────────────────────────────────────────
+    def _notify(self, title, text, url=None):
+        if self.tray:
+            self.tray.notify(title, text,
+                             on_click=(lambda: webbrowser.open(url)) if url else
+                             (lambda: self._post(self.show_window)))
+        else:
+            notify_windows(title, text)
+
+    # ── Bottom panel: store changes and activity ──────────────────────
+
+    def _load_recent_changes(self):
+        """The changes feed starts with the latest ones from the history."""
+        for ev in [e for e in stock_history.get_events(limit=200) if not e.get("first")][-50:]:
+            ts = str(ev.get("ts", ""))
+            self._changes.append((ts[11:16] if len(ts) >= 16 else ts, ev.get("title", ""),
+                                  bool(ev.get("in_stock")), ev.get("price")))
+        self._render_bottom()
+
+    def _set_bottom(self, key):
+        self._bottom_view = key
+        self._render_bottom()
+
+    def _render_bottom(self):
+        if not hasattr(self, "log_text"):
+            return
+        for key, b in self._seg.items():
+            b.configure(style="Card.TButton" if key == self._bottom_view else "Card.Subtle.TButton")
+        t = self.log_text
+        t.configure(state="normal")
+        t.delete("1.0", "end")
+        if self._bottom_view == "changes":
+            for entry in self._changes:
+                self._insert_change(*entry)
+            self._changes_count_lbl.config(
+                text=f"{self._change_count} this session" if self._change_count else
+                "products coming into or going out of stock, anywhere in the store")
+        else:
+            for ts, msg, tag in self._log_lines:
+                t.insert("end", f"{ts}  ", "time")
+                t.insert("end", msg + "\n", tag)
+            self._changes_count_lbl.config(text="")
+        t.see("end")
+        t.configure(state="disabled")
+
+    def _insert_change(self, ts, title, in_stock, price):
+        t = self.changes_text
+        t.insert("end", f"{ts}  ", "time")
+        if in_stock:
+            t.insert("end", "▲ In stock   ", "in_stock")
+        else:
+            t.insert("end", "▼ Sold out   ", "oos")
+        t.insert("end", title, "name")
+        if price:
+            t.insert("end", f"  {price}", "price")
+        t.insert("end", "\n")
 
     def _add_change(self, title, in_stock, price=None):
-        """Add a stock transition event to the changes feed."""
-        ts = datetime.now().strftime("%H:%M:%S")
+        """Add a stock transition to the changes feed."""
+        ts = datetime.now().strftime("%H:%M")
         self._change_count += 1
-        self.changes_text.configure(state="normal")
-        self.changes_text.insert("end", f"[{ts}] ", "time")
-        if in_stock:
-            self.changes_text.insert("end", "▲ ", "arrow_up")
-            self.changes_text.insert("end", "NOW IN STOCK", "in_stock")
-        else:
-            self.changes_text.insert("end", "▼ ", "arrow_down")
-            self.changes_text.insert("end", "WENT OUT OF STOCK", "oos")
-        self.changes_text.insert("end", "  ", "time")
-        self.changes_text.insert("end", title, "name")
-        if price:
-            self.changes_text.insert("end", f"  {price}", "price")
-        self.changes_text.insert("end", "\n")
-        _trim_text(self.changes_text, MAX_CHANGE_LINES)
-        self.changes_text.see("end")
-        self.changes_text.configure(state="disabled")
-        self._changes_count_lbl.config(text=f"({self._change_count})")
+        self._changes.append((ts, title, in_stock, price))
+        if self._bottom_view == "changes":
+            t = self.changes_text
+            t.configure(state="normal")
+            self._insert_change(ts, title, in_stock, price)
+            _trim_text(t, MAX_CHANGE_LINES)
+            t.see("end")
+            t.configure(state="disabled")
+            self._changes_count_lbl.config(text=f"{self._change_count} this session")
+        if self._tab == "history" and self._history_widget:
+            self._history_widget.refresh()
 
-    def _toggle_changes(self):
-        if self._changes_open:
-            self.changes_body.pack_forget()
-            self._changes_arrow.config(text="▸  STOCK CHANGES")
-            self._changes_open = False
+    def _clear_bottom(self):
+        if self._bottom_view == "changes":
+            self._clear_changes()
         else:
-            self.changes_body.pack(fill="x", padx=10, pady=(0, 8))
-            self._changes_arrow.config(text="▾  STOCK CHANGES")
-            self._changes_open = True
+            self._clear_log()
 
     def _clear_changes(self):
-        self.changes_text.configure(state="normal")
-        self.changes_text.delete("1.0", "end")
-        self.changes_text.configure(state="disabled")
+        self._changes.clear()
         self._change_count = 0
-        self._changes_count_lbl.config(text="")
-
-    # ── Log helpers ───────────────────────────────────────────────────
-
-    def _toggle_log(self):
-        if self._log_open:
-            self.log_body.pack_forget()
-            self._log_arrow.config(text="▸  ACTIVITY LOG")
-            self._log_open = False
-        else:
-            self.log_body.pack(fill="x", padx=10, pady=(0, 8))
-            self._log_arrow.config(text="▾  ACTIVITY LOG")
-            self._log_open = True
+        self._render_bottom()
 
     def _log(self, msg, tag="info"):
         ts = datetime.now().strftime("%H:%M:%S")
-        self.log_text.configure(state="normal")
-        self.log_text.insert("end", f"[{ts}] ", "time")
-        self.log_text.insert("end", msg + "\n", tag)
-        _trim_text(self.log_text, MAX_LOG_LINES)
-        self.log_text.see("end")
-        self.log_text.configure(state="disabled")
+        self._log_lines.append((ts, msg, tag))
+        log.info(msg)
+        if self._bottom_view != "activity":
+            return
+        t = self.log_text
+        t.configure(state="normal")
+        t.insert("end", f"{ts}  ", "time")
+        t.insert("end", msg + "\n", tag)
+        _trim_text(t, MAX_LOG_LINES)
+        t.see("end")
+        t.configure(state="disabled")
 
     def _clear_log(self):
-        self.log_text.configure(state="normal")
-        self.log_text.delete("1.0", "end")
-        self.log_text.configure(state="disabled")
+        self._log_lines.clear()
+        self._render_bottom()
 
-    def _set_status(self, text, color):
-        self.status_lbl.config(text=text, fg=color)
-        self.status_dot.config(fg=color)
+    def _set_status(self, text, colour):
+        self._status_text = (text, colour)
+        c = self.theme.c
+        self.status_lbl.config(text=text)
+        self.status_dot.config(foreground=c.get(colour, colour))
+
+    # ── Menus ─────────────────────────────────────────────────────────
+
+    def _app_menu(self):
+        m = tk.Menu(self, tearoff=0, **self.theme.menu_colours())
+        m.add_command(label="Check for updates", command=self.check_for_updates)
+        m.add_command(label="Open your files' folder", command=lambda: winplatform.open_path(BASE_DIR))
+        m.add_command(label="Report a problem…", command=lambda: webbrowser.open(ISSUE_URL))
+        m.add_command(label="Project page", command=lambda: webbrowser.open(SITE_URL))
+        m.add_separator()
+        m.add_command(label="Quit", command=self.quit_app)
+        b = self._menu_btn
+        try:
+            m.tk_popup(b.winfo_rootx(), b.winfo_rooty() + b.winfo_height())
+        finally:
+            m.grab_release()
+
+    def _tray_menu(self):
+        """Built on the tray thread: read state only, act through _post."""
+        Item = traymod.MenuItem
+        items = [Item(f"Open {APP_NAME}", lambda: self._post(self.show_window), default=True),
+                 Item(None),
+                 Item("Stop watching" if self.watching else "Start watching",
+                      lambda: self._post(self._toggle_watch), enabled=bool(self.watched)),
+                 Item("Check now", lambda: self._post(self._force_check),
+                      enabled=bool(self.watched))]
+        if self.available_update and self.available_update.can_install:
+            items += [Item(None), Item(f"Install version {self.available_update.version}",
+                                       lambda: self._post(self.install_update))]
+        items += [Item(None), Item("Quit", lambda: self._post(self.quit_app))]
+        return items
 
     def _test_notif(self):
-        self._log("Firing test notification…", "info")
-        notify_windows("TEST: Unifi Stock Watcher",
-                       "This is what an in-stock alert looks like.")
+        self._log("Sending a test alert…", "info")
+        self._notify(f"TEST: {APP_NAME}", "This is what an in-stock alert looks like.",
+                     store_home(self.settings.get("region", "us")))
         if self.settings.get("sound_alerts", True):
             play_sound()
-        self._log("Sent — check bottom-right corner.", "ok")
 
-    def _open_store(self):
-        region = self.settings.get("region", "us")
-        webbrowser.open(store_home(region))
+    # ── Updates ───────────────────────────────────────────────────────
+
+    def _refresh_update_ui(self):
+        self._build_banner()
+        if self._settings_widget:
+            try:
+                self._settings_widget.refresh_update()
+            except tk.TclError:
+                pass
+
+    def check_for_updates(self, quiet=False):
+        if self.update_busy:
+            return
+        self.update_busy = True
+        self.update_status = "Checking…"
+        self._refresh_update_ui()
+
+        def run():
+            try:
+                u = updater.check()
+                status = (f"Version {u.version} is available." if u else
+                          f"You're up to date ({__version__}).")
+            except Exception as e:
+                log.warning("Update check failed: %s", e)
+                u, status = None, f"Couldn't check: {e}"
+            self._post(self._on_update_checked, u, status, quiet)
+        threading.Thread(target=run, daemon=True, name="unifi-update-check").start()
+        if quiet:
+            self.after(UPDATE_RECHECK_MS, lambda: self.settings.get("check_updates")
+                       and self.check_for_updates(quiet=True))
+
+    def _on_update_checked(self, u, status, quiet):
+        self.update_busy = False
+        self.update_status = status
+        if u and (not self.available_update or self.available_update.version != u.version):
+            self._update_dismissed = False
+            self._log(f"Version {u.version} is available.", "ok")
+            if self.tray and not self.winfo_viewable():
+                self.tray.notify(f"{APP_NAME} {u.version} is available",
+                                 "Click to open the app and install it.",
+                                 on_click=lambda: self._post(self.show_window))
+        self.available_update = u
+        self._refresh_update_ui()
+
+    def install_update(self):
+        u = self.available_update
+        if not u or not u.can_install or self.update_busy:
+            return
+        self.update_busy = True
+        self.update_status = f"Downloading {u.version}…"
+        self._refresh_update_ui()
+
+        def progress(done, total):
+            pct = int(done * 100 / total) if total else 0
+            self.update_status = f"Downloading {u.version}… {pct}%"
+            self._post(self._refresh_update_ui)
+
+        def run():
+            try:
+                path = updater.download(u, progress=progress)
+                self.update_status = f"Installing {u.version}…"
+                self._post(self._refresh_update_ui)
+                self.settings["resume_watching"] = self.watching
+                save_settings(self.settings)
+                updater.apply(u, path)
+                self._post(self.quit_app)
+            except Exception as e:
+                log.exception("Update failed")
+                # Bound now: `e` is unbound once this block ends, before the
+                # deferred dialog runs.
+                msg = str(e)
+                self.update_busy = False
+                self.update_status = f"The update didn't install: {msg}"
+                self._post(self._refresh_update_ui)
+                self._post(lambda: messagebox.showerror(
+                    APP_NAME, f"The update didn't install:\n\n{msg}", parent=self))
+        threading.Thread(target=run, daemon=True, name="unifi-update").start()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
+def self_test():
+    """Build the real window, every tab and the tray icon, then write
+    selftest.json to the data folder and exit: what CI runs against the
+    frozen build, which is where a missing asset or module shows up. No
+    network; point USW_DATA_DIR at an empty folder first."""
+    from unifi_core import write_json
+    report = {"version": __version__, "kind": updater.install_kind(),
+              "data_dir": str(BASE_DIR), "frozen": bool(getattr(sys, "frozen", False))}
+    app = UnifiWatcherApp(use_tray=False, check_updates=False)
+    tray_icon = traymod.TrayIcon(
+        {k: resource(f"tray-{k}.ico") for k in ("idle", "watching", "alert")},
+        APP_NAME, lambda: [], app_icon=resource("icon.ico"))
+    report["tray"] = tray_icon.start() if traymod.AVAILABLE else None
+    tray_icon.stop()
+
+    def finish():
+        report.update(theme_dark=app.theme.dark, images=len(app.theme._images),
+                      history=app._history_widget is not None,
+                      settings=app._settings_widget is not None, ok=True)
+        write_json(BASE_DIR / "selftest.json", report)
+        app.quit_app()
+
+    def tabs():
+        for key in ("history", "settings", "watch"):
+            app._show_tab(key)
+        app.after(500, finish)
+    app.after(1000, tabs)
+    app.after(30000, app.quit_app)          # never hang a CI job
+    app.mainloop()
+    return 0 if report.get("ok") else 1
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--finish-update" in argv:
+        # The staged copy of a portable update: swap it in, start it, exit.
+        i = argv.index("--finish-update")
+        return updater.finish_update(argv[i + 1], argv[i + 2])
+    if "--version" in argv:
+        print(f"{APP_NAME} {__version__}")
+        return 0
+    if "--self-test" in argv:
+        return self_test()
+
     if not _HAVE_REQUESTS:
         root = tk.Tk()
         root.withdraw()
         messagebox.showerror("Missing dependency", missing_message())
-        sys.exit(1)
-    app = UnifiWatcherApp()
-    app.mainloop()
+        return 1
+
+    setup_logging()
+    log.info("%s %s starting (%s)", APP_NAME, __version__, updater.install_kind())
+    migrate_legacy_files()
+
+    instance = winplatform.SingleInstance()
+    if instance.already_running:
+        if instance.signal_existing():
+            return 0
+        log.warning("Another copy holds the mutex but has no tray window; starting anyway")
+    if updater.install_kind() == "installed":
+        winplatform.set_app_id(APP_ID)
+
+    settings = load_settings()
+    resume = False
+    if "--updated" in argv or "--update-failed" in argv:
+        updater.cleanup_after_update()
+        resume = bool(settings.get("resume_watching"))
+        if resume:
+            settings["resume_watching"] = False
+            save_settings(settings)
+
+    app = UnifiWatcherApp(start_minimized="--minimized" in argv,
+                          watch_now="--watch" in argv or resume)
+    if "--updated" in argv:
+        app._log(f"Updated to {__version__}.", "ok")
+    if "--update-failed" in argv:
+        app.after(800, lambda: messagebox.showerror(
+            APP_NAME, "The update couldn't be installed, so this version was started "
+                      f"again. Details are in {updater.UPDATE_LOG}.", parent=app))
+    try:
+        app.mainloop()
+    finally:
+        stock_history.flush()
+        instance.release()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -23,7 +23,12 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "2.1.0"
+__version__ = "3.0.0"
+
+APP_NAME = "UniFi Stock Watcher"
+APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
+REPO     = "jamesccupps/UnifiStockWatcher"
+REPO_URL = f"https://github.com/{REPO}"
 
 log = logging.getLogger("unifi_watcher")
 
@@ -36,19 +41,52 @@ class ProductNotFound(StoreError):
     """The slug does not resolve to a product any more."""
 
 # ── Paths ────────────────────────────────────────────────────────────────────
+#
+# Program files and the user's files live apart. The installer puts the program
+# in %LOCALAPPDATA%\Programs, where updates replace it wholesale; the watch list
+# and settings live in %APPDATA%\UniFi Stock Watcher and survive that.
+#
+# A portable copy (the zip) carries a `portable.txt` beside the executable and
+# keeps its files in that folder instead - which is also where 2.x's single
+# portable .exe kept them, so unzipping 3.x over a 2.x folder keeps the list.
+
+PORTABLE_MARKER = "portable.txt"
+DATA_FILES = ("watched_items.json", "settings.json",
+              "stock_history.json", "category_cache.json")
+
+
+def program_dir():
+    """The folder holding the executable (frozen) or these sources."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def is_portable():
+    return (program_dir() / PORTABLE_MARKER).is_file()
+
+
+def _user_data_dir():
+    if sys.platform == "win32":
+        root = os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming"
+        return Path(root) / APP_NAME
+    root = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
+    return Path(root) / "unifi-stock-watcher"
+
 
 def _base_dir():
-    """Where runtime files live.
+    """Where the watch list, settings and history live.
 
-    Frozen by PyInstaller, __file__ points inside the temporary extraction
-    directory, which is deleted on exit - a watch list written there would be
-    silently lost every run. Use the directory holding the executable instead,
-    which keeps the app portable: drop the .exe in a folder and its config
-    lives beside it.
+    USW_DATA_DIR overrides everything, for tests and CI smoke runs. Never the
+    PyInstaller extraction directory: a watch list written there is deleted
+    on exit.
     """
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).parent
-    return Path(__file__).parent
+    override = os.environ.get("USW_DATA_DIR")
+    if override:
+        return Path(override)
+    if is_portable():
+        return program_dir()
+    return _user_data_dir()
 
 
 BASE_DIR       = _base_dir()
@@ -56,6 +94,61 @@ CONFIG_FILE    = BASE_DIR / "watched_items.json"
 SETTINGS_FILE  = BASE_DIR / "settings.json"
 HISTORY_FILE   = BASE_DIR / "stock_history.json"
 CATEGORY_CACHE_FILE = BASE_DIR / "category_cache.json"
+LOG_FILE       = BASE_DIR / "unifi-stock-watcher.log"
+
+
+def migrate_legacy_files():
+    """Copy 2.x files from beside the program into the data folder, once.
+
+    2.x kept everything next to unifi_watcher_gui.py (or the .exe). A copy
+    that now uses %APPDATA% finds its watch list there the first time it
+    starts. Copies, never moves: the old folder stays a working 2.x install,
+    and nothing is overwritten. Returns the names copied.
+    """
+    legacy = program_dir()
+    if legacy == BASE_DIR or os.environ.get("USW_DATA_DIR"):
+        return []
+    if (BASE_DIR / "watched_items.json").exists():
+        return []
+    copied = []
+    for name in DATA_FILES:
+        src, dst = legacy / name, BASE_DIR / name
+        if src.is_file() and not dst.exists():
+            try:
+                BASE_DIR.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+                copied.append(name)
+            except OSError as e:
+                log.warning("Could not copy %s from %s: %s", name, legacy, e)
+    if copied:
+        log.warning("Copied %s from %s", ", ".join(copied), legacy)
+        if "stock_history.json" in copied:
+            stock_history.reload()
+    return copied
+
+
+def setup_logging(level=logging.INFO, console=False):
+    """A size-capped log in the data folder; the first place to look when
+    something goes wrong. Console output too for the CLI."""
+    from logging.handlers import RotatingFileHandler
+    root = logging.getLogger()
+    root.setLevel(level)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s",
+                            "%Y-%m-%d %H:%M:%S")
+    try:
+        BASE_DIR.mkdir(parents=True, exist_ok=True)
+        fh = RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=1,
+                                 encoding="utf-8")
+        fh.setFormatter(fmt)
+        root.addHandler(fh)
+    except OSError:
+        pass
+    if console:
+        sh = logging.StreamHandler()
+        sh.setLevel(logging.WARNING)
+        sh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s: %(message)s",
+                                          "%H:%M:%S"))
+        root.addHandler(sh)
 
 # ── Store constants ──────────────────────────────────────────────────────────
 
@@ -105,26 +198,74 @@ HEADERS = {
     "Accept": "application/json, text/html",
 }
 
+# A store slug is lowercase letters, digits and hyphens. Anything else - from a
+# hand-edited or shared watch list - would be pasted into store URLs.
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,199}$", re.IGNORECASE)
+
+
+def is_valid_slug(slug):
+    return isinstance(slug, str) and bool(_SLUG_RE.match(slug)) and ".." not in slug
+
+
+def store_home(region="us"):
+    return f"{STORE_BASE}/{STORE_REGIONS.get(region, STORE_REGIONS['us'])['path']}"
+
+
+def product_url(slug, region="us"):
+    """The store page for a product, or the store's home for a bad slug."""
+    if not is_valid_slug(slug):
+        return store_home(region)
+    return f"{store_home(region)}/products/{slug}"
+
 # ── Default settings ─────────────────────────────────────────────────────────
 
+POLL_MIN, POLL_MAX = 15, 3600
+FONT_SIZES = (9, 10, 11, 12, 13, 14)
+THEMES = ("system", "light", "dark")
+
 DEFAULT_SETTINGS = {
-    "font_size":      10,
-    "font_family":    "Segoe UI",
-    "bg":             "#0d1117",
-    "panel":          "#161b22",
-    "accent":         "#1f6feb",
-    "green":          "#3fb950",
-    "red":            "#f85149",
-    "gold":           "#e3b341",
-    "text":           "#e6edf3",
-    "muted":          "#7d8590",
-    "poll_interval":  60,
-    "sound_alerts":   True,
-    "auto_open_url":  True,
-    "auto_start":     False,
-    "region":         "us",
-    "max_retries":    3,
+    "poll_interval":      60,
+    "region":             "us",
+    "notifications":      True,
+    "sound_alerts":       True,
+    "auto_open_url":      True,
+    "auto_start":         False,    # start watching when the app opens
+    "close_to_tray":      True,
+    "check_updates":      True,
+    "theme":              "system",
+    "accent":             "",       # "" = Windows' accent colour
+    "font_size":          10,
+    "max_retries":        3,
+    "window":             None,     # [x, y, w, h] in screen pixels
+    "resume_watching":    False,    # set before an update restarts the app
 }
+
+_HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def _valid_setting(key, value):
+    default = DEFAULT_SETTINGS[key]
+    if key == "poll_interval":
+        return isinstance(value, int) and not isinstance(value, bool) \
+            and POLL_MIN <= value <= POLL_MAX
+    if key == "region":
+        return value in STORE_REGIONS
+    if key == "theme":
+        return value in THEMES
+    if key == "accent":
+        return value == "" or (isinstance(value, str) and bool(_HEX_RE.match(value)))
+    if key == "font_size":
+        return value in FONT_SIZES
+    if key == "max_retries":
+        return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 10
+    if key == "window":
+        return value is None or (
+            isinstance(value, list) and len(value) == 4
+            and all(isinstance(v, int) and not isinstance(v, bool) for v in value)
+            and value[2] > 0 and value[3] > 0)
+    if isinstance(default, bool):
+        return isinstance(value, bool)
+    return isinstance(value, type(default))
 
 # ── JSON persistence ─────────────────────────────────────────────────────────
 
@@ -152,6 +293,7 @@ def write_json(path, data):
     sibling temp file and rename - os.replace is atomic on NTFS and POSIX.
     """
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + ".tmp")
     payload = json.dumps(data, indent=2, ensure_ascii=False)
     try:
@@ -168,59 +310,31 @@ def write_json(path, data):
 # ── Settings load/save ───────────────────────────────────────────────────────
 
 def load_settings():
+    """Defaults, overlaid with every stored value that is well-formed.
+
+    A hand-edited or damaged settings.json must never stop the app starting:
+    an unknown region used to raise KeyError on every store call, and a bad
+    colour stopped the window opening at all. Bad values fall back to their
+    default; keys this version does not know (2.x's colour scheme) are dropped.
+    """
     merged = DEFAULT_SETTINGS.copy()
     stored = read_json(SETTINGS_FILE, {})
     if isinstance(stored, dict):
-        merged.update(stored)
+        for key, value in stored.items():
+            if key in DEFAULT_SETTINGS and _valid_setting(key, value):
+                merged[key] = value
+            elif key in DEFAULT_SETTINGS:
+                log.warning("Ignoring invalid setting %s=%r", key, value)
+        # 2.x let the interval be typed freely; keep a sane one rather than
+        # discarding it.
+        pi = stored.get("poll_interval")
+        if isinstance(pi, int) and not isinstance(pi, bool) and not _valid_setting("poll_interval", pi):
+            merged["poll_interval"] = min(max(pi, POLL_MIN), POLL_MAX)
     return merged
 
 
 def save_settings(s):
-    write_json(SETTINGS_FILE, s)
-
-
-# ── Palette builder ──────────────────────────────────────────────────────────
-
-def build_palette(s):
-    import colorsys
-
-    def lighten(hex_col, amount=0.15):
-        hex_col = hex_col.lstrip("#")
-        r, g, b = [int(hex_col[i:i+2], 16) / 255 for i in (0, 2, 4)]
-        h, l, sat = colorsys.rgb_to_hls(r, g, b)
-        l = min(1.0, l + amount)
-        r2, g2, b2 = colorsys.hls_to_rgb(h, l, sat)
-        return "#{:02x}{:02x}{:02x}".format(int(r2*255), int(g2*255), int(b2*255))
-
-    def darken(hex_col, amount=0.05):
-        hex_col = hex_col.lstrip("#")
-        r, g, b = [int(hex_col[i:i+2], 16) / 255 for i in (0, 2, 4)]
-        h, l, sat = colorsys.rgb_to_hls(r, g, b)
-        l = max(0.0, l - amount)
-        r2, g2, b2 = colorsys.hls_to_rgb(h, l, sat)
-        return "#{:02x}{:02x}{:02x}".format(int(r2*255), int(g2*255), int(b2*255))
-
-    bg     = s["bg"]
-    panel  = s["panel"]
-    accent = s["accent"]
-
-    return {
-        "bg":       bg,
-        "panel":    panel,
-        "border":   lighten(bg, 0.08),
-        "hover":    lighten(bg, 0.05),
-        "text":     s["text"],
-        "muted":    s["muted"],
-        "accent":   accent,
-        "accent_h": lighten(accent, 0.12),
-        "green":    s["green"],
-        "red":      s["red"],
-        "yellow":   "#d29922",
-        "gold":     s["gold"],
-        "white":    "#ffffff",
-        "tag_bg":   lighten(bg, 0.06),
-        "fav_bg":   "#1c1a10",
-    }
+    write_json(SETTINGS_FILE, {k: s[k] for k in DEFAULT_SETTINGS if k in s})
 
 
 # ── HTTP session ─────────────────────────────────────────────────────────────
@@ -772,6 +886,8 @@ def check_slug(build_id, slug, region="us", retries=3):
     the store cannot be reached. It never reports a fabricated "out of stock" -
     that silently defeats the entire point of a stock watcher.
     """
+    if not is_valid_slug(slug):
+        raise ProductNotFound(f"{slug!r}: not a store product id")
     last_err = None
     for attempt in range(retries):
         try:
@@ -812,7 +928,7 @@ def _normalise_watched(data):
     """Keep only well-formed entries, filling in optional fields."""
     items = []
     for item in data if isinstance(data, list) else []:
-        if not isinstance(item, dict) or not item.get("slug"):
+        if not isinstance(item, dict) or not is_valid_slug(item.get("slug")):
             log.warning("Skipping malformed watch list entry: %r", item)
             continue
         item.setdefault("title", item["slug"])
@@ -833,40 +949,72 @@ def save_watched(items):
 
 # ── Stock history ────────────────────────────────────────────────────────────
 
-MAX_HISTORY_EVENTS = 2000
+MAX_HISTORY_EVENTS = 5000
+HISTORY_VERSION = 2
 
 
 def _empty_history():
-    return {"events": [], "stats": {"total_checks": 0, "in_stock_alerts": 0}}
+    return {"version": HISTORY_VERSION, "events": [],
+            "stats": {"total_checks": 0, "alerts": 0}}
+
+
+def _valid_event(e):
+    return (isinstance(e, dict) and isinstance(e.get("ts"), str)
+            and isinstance(e.get("slug"), str) and isinstance(e.get("in_stock"), bool))
 
 
 class StockHistory:
-    """Stock check events, persisted to JSON for history and stats.
+    """Stock changes, persisted to JSON for the History tab and stats.
 
-    Writes are deferred rather than issued per event: the watcher records one
-    event per watched item per cycle, and re-serialising the whole 2000-event
-    file each time meant tens of megabytes of disk churn per hour for a
-    modest watch list. flush() is called on a timer and at shutdown.
+    An event is a change: a product coming into or going out of stock, or a
+    watched item's first state. 2.x appended one event per watched item per
+    check, so 50 items polled every minute filled the 2000-event file with
+    identical "out of stock" lines in 40 minutes and pushed every real change
+    out of it. Checks are counted, not logged.
+
+    Writes are deferred and batched; flush() runs on a timer and at shutdown.
     """
 
-    def __init__(self, path=HISTORY_FILE, autosave_after=25):
-        self._path = Path(path)
+    def __init__(self, path=None, autosave_after=25):
+        self._path = Path(path) if path is not None else HISTORY_FILE
         self._lock = threading.Lock()
-        self._data = self._load()
-        self._dirty = False
-        self._unsaved = 0
         self._autosave_after = autosave_after
+        self.reload()
+
+    def reload(self):
+        """Read the file again, dropping anything unsaved (after a migration
+        has put a 2.x history in place under this instance)."""
+        with self._lock:
+            self._data = self._load()
+            self._last = {}             # slug -> last recorded in_stock
+            for e in self._data["events"]:
+                self._last[e["slug"]] = e["in_stock"]
+            self._dirty = False
+            self._unsaved = 0
 
     def _load(self):
         data = read_json(self._path, None)
         if not isinstance(data, dict):
             return _empty_history()
-        # Tolerate a hand-edited or partially written file.
         merged = _empty_history()
-        if isinstance(data.get("events"), list):
-            merged["events"] = data["events"]
-        if isinstance(data.get("stats"), dict):
-            merged["stats"].update(data["stats"])
+        events = [e for e in data.get("events") or [] if _valid_event(e)] \
+            if isinstance(data.get("events"), list) else []
+        stats = data.get("stats") if isinstance(data.get("stats"), dict) else {}
+        if data.get("version") != HISTORY_VERSION:
+            # 2.x: one event per check. Keep only the changes, and drop its
+            # "in_stock_alerts", which counted in-stock checks, not alerts.
+            last, kept = {}, []
+            for e in events:
+                if last.get(e["slug"]) != e["in_stock"]:
+                    e.setdefault("watched", True)
+                    kept.append(e)
+                last[e["slug"]] = e["in_stock"]
+            events = kept
+            stats = {"total_checks": stats.get("total_checks", 0)}
+        merged["events"] = events[-MAX_HISTORY_EVENTS:]
+        for key in merged["stats"]:
+            if isinstance(stats.get(key), int):
+                merged["stats"][key] = stats[key]
         return merged
 
     def _save_locked(self):
@@ -876,38 +1024,64 @@ class StockHistory:
         self._dirty = False
         self._unsaved = 0
 
+    def _touch_locked(self):
+        self._dirty = True
+        self._unsaved += 1
+        if self._unsaved >= self._autosave_after:
+            self._save_locked()
+
     def flush(self):
-        """Persist pending events. Safe to call when nothing has changed."""
+        """Persist pending changes. Safe to call when nothing has changed."""
         with self._lock:
             if self._dirty:
                 self._save_locked()
 
-    def record_check(self, slug, title, in_stock, price=None):
+    def record(self, slug, title, in_stock, price=None, watched=True):
+        """Record a product's state; logged only when it differs from the
+        last state recorded for that product. Returns True if logged."""
         with self._lock:
-            self._data["stats"]["total_checks"] += 1
-            if in_stock:
-                self._data["stats"]["in_stock_alerts"] += 1
+            if watched:
+                self._data["stats"]["total_checks"] += 1
+            if self._last.get(slug) == in_stock:
+                if watched:
+                    self._touch_locked()
+                return False
+            # Only a watched product's first state is a sighting; any other
+            # product is recorded only when it changes.
+            first = watched and slug not in self._last
+            self._last[slug] = in_stock
             self._data["events"].append({
-                "ts":       datetime.now().isoformat(),
+                "ts":       datetime.now().isoformat(timespec="seconds"),
                 "slug":     slug,
                 "title":    title,
-                "in_stock": in_stock,
+                "in_stock": bool(in_stock),
                 "price":    price,
+                "watched":  bool(watched),
+                "first":    first,      # a first sighting, not a change
             })
-            self._dirty = True
-            self._unsaved += 1
-            if self._unsaved >= self._autosave_after:
-                self._save_locked()
+            self._touch_locked()
+            return True
+
+    # 2.x name, kept for scripts that drive the core directly.
+    def record_check(self, slug, title, in_stock, price=None):
+        return self.record(slug, title, in_stock, price, watched=True)
+
+    def record_alert(self):
+        with self._lock:
+            self._data["stats"]["alerts"] += 1
+            self._touch_locked()
 
     def get_stats(self):
         with self._lock:
             return self._data["stats"].copy()
 
-    def get_events(self, slug=None, limit=50):
+    def get_events(self, slug=None, limit=50, watched_only=False):
         with self._lock:
             events = self._data["events"]
             if slug:
                 events = [e for e in events if e.get("slug") == slug]
+            if watched_only:
+                events = [e for e in events if e.get("watched")]
             return events[-limit:] if limit else list(events)
 
     def last_in_stock(self, slug):
@@ -920,6 +1094,7 @@ class StockHistory:
     def clear(self):
         with self._lock:
             self._data = _empty_history()
+            self._last = {}
             self._save_locked()
 
 
@@ -1008,12 +1183,14 @@ def import_watchlist(filepath):
     for item in _normalise_watched(raw):
         if item["slug"] in slugs:
             continue
+        added_at = item["added_at"]
         existing.append({
-            "slug":      str(item["slug"])[:200],
+            "slug":      item["slug"],
             "title":     str(item["title"])[:200],
             "favourite": bool(item["favourite"]),
-            "price":     item["price"] if isinstance(item["price"], str) else None,
-            "added_at":  item["added_at"] or datetime.now().isoformat(),
+            "price":     item["price"][:40] if isinstance(item["price"], str) else None,
+            "added_at":  added_at[:40] if isinstance(added_at, str) and added_at
+                         else datetime.now().isoformat(),
         })
         slugs.add(item["slug"])
         added += 1

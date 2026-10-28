@@ -2,8 +2,14 @@
 
 # CMD is unreliable with LF-only batch files - goto/labels can misbehave.
 *.bat text eol=crlf
+*.iss text eol=crlf
+*.ps1 text eol=crlf
 
 *.py   text eol=lf
 *.md   text eol=lf
 *.yml  text eol=lf
 *.json text eol=lf
+*.html text eol=lf
+
+*.png binary
+*.ico binary

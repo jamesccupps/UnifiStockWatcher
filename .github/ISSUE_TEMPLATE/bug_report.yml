@@ -1,0 +1,63 @@
+name: Bug report
+description: Something in UniFi Stock Watcher doesn't work the way it should
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time! **Settings → About → Report…** in the app opens this form with the version filled in.
+
+        If a product shows the wrong stock, include its store link: the store changes shape now and then, and the link is what shows how.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect?
+  - type: textarea
+    id: steps
+    attributes:
+      label: How to make it happen, if you know
+      placeholder: |
+        1. Add "Switch Pro Max 24 PoE" to the watch list
+        2. Start watching
+        3. …
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Settings → Updates shows it
+      placeholder: "3.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Which copy
+      options:
+        - Installed (UnifiStockWatcher-Setup.exe)
+        - Portable (the zip)
+        - From source (Python)
+        - The command-line watcher
+    validations:
+      required: true
+  - type: dropdown
+    id: region
+    attributes:
+      label: Store
+      options:
+        - United States
+        - Europe
+        - United Kingdom
+        - Canada
+  - type: textarea
+    id: more
+    attributes:
+      label: Anything else
+      description: >
+        Screenshots help. The log, unifi-stock-watcher.log, is in the app's data folder (Settings → About → Open folder);
+        it holds product names and times, nothing personal, but look it over before attaching it.

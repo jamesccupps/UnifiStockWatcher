@@ -5,12 +5,19 @@ session so the suite runs offline and deterministically.
 """
 
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+# Before unifi_core is imported: its module-level history (and anything else
+# that resolves the data folder) must never see the real one.
+os.environ["USW_DATA_DIR"] = tempfile.mkdtemp(prefix="usw-tests-")
+os.environ.pop("USW_UPDATE_URL", None)
 
 import unifi_core  # noqa: E402
 
@@ -124,4 +131,5 @@ def product_page(current_slug, *collection_products):
 
 
 def write(path, data):
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
     Path(path).write_text(json.dumps(data), encoding="utf-8")

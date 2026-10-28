@@ -1,82 +1,100 @@
+# Push a tag vX.Y.Z (matching unifi_core.__version__) to test, build, sign, check and publish a
+# release. The release key comes from the UPDATE_SIGNING_KEY secret, lives in a temp file for this
+# job only, and latest.json is checked against the public key built into the app before anything
+# is published: a wrong secret stops the release here, not in users' updaters.
+#
+# What installed copies read from a release can never change: the tag vX.Y.Z, and the assets
+# UnifiStockWatcher-Setup.exe, UnifiStockWatcher-win64.zip and latest.json (updater.py).
 name: Release
-
-# Builds the Windows executables and attaches them to the GitHub release for
-# a v* tag. "Install Python, tick Add to PATH, run a .bat" is where most
-# people give up; a double-clickable .exe is the whole point.
 
 on:
   push:
-    tags: ["v*"]
-  workflow_dispatch:
+    tags: ["v*.*.*"]
 
 permissions:
-  contents: write            # needed to attach assets to the release
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  build:
+  release:
     runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-
+    timeout-minutes: 45
+    permissions:
+      contents: write          # the release itself, and only here
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.13"
-          cache: pip
 
-      - name: Install dependencies
+      - name: Tag must match the version
+        shell: pwsh
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          # The updater compares this tag with the version built into the app: if they differed,
+          # every copy would download this release again every day. (The tag comes through the
+          # environment, never pasted into the script.)
+          $v = python -c "import unifi_core; print(unifi_core.__version__)"
+          if ("v$v" -ne $env:TAG) { throw "tag $env:TAG, but unifi_core.__version__ is $v" }
+
+      - name: Install dependencies and Inno Setup
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install pytest pyinstaller
+          pip install -r requirements.txt -r requirements-dev.txt
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup --no-progress -y
+          }
 
-      # Never ship a binary that fails its own tests.
-      - name: Test
-        run: python -m pytest tests --tb=short
-
-      - name: Build
-        run: python -m PyInstaller UnifiStockWatcher.spec --noconfirm --clean
-
-      - name: Smoke-test the executables
+      - name: Lint and test
         run: |
-          set -e
-          test -f dist/UnifiStockWatcher.exe
-          test -f dist/UnifiStockWatcher-cli.exe
+          python -m pyflakes unifi_core.py unifi_watcher.py unifi_watcher_gui.py updater.py ed25519.py gfx.py theme.py tray.py winplatform.py
+          python -m pytest tests --tb=short
 
-          mkdir -p smoke && cd smoke
-          cp ../dist/UnifiStockWatcher-cli.exe .
-          out=$(./UnifiStockWatcher-cli.exe --version)
-          echo "$out"
+      - name: Write the signing key for this job
+        shell: pwsh
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+        run: |
+          if (-not $env:UPDATE_SIGNING_KEY) { throw "The UPDATE_SIGNING_KEY secret isn't set; an unsigned release would never reach installed copies." }
+          $f = Join-Path $env:RUNNER_TEMP 'update-signing-key.pem'
+          [IO.File]::WriteAllText($f, $env:UPDATE_SIGNING_KEY.Trim() + "`n")
+          "USW_SIGNING_KEY=$f" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
-          echo "$out" | grep -q "UniFi Stock Watcher" \
-            || { echo "the executable did not start"; exit 1; }
+      - name: Build the folder, the zip, the installer and the signed latest.json
+        run: python scripts/build_windows.py
 
-          # A frozen app must resolve its config next to the exe. Resolving it
-          # into PyInstaller's temp extraction directory (_MEIxxxx) loses the
-          # watch list on every run, silently. Match on directory name rather
-          # than a full path, so this does not turn into a slash-direction quiz.
-          case "$out" in
-            *_MEI*) echo "config resolved into the temp extraction dir"; exit 1 ;;
-          esac
-          echo "$out" | grep -qi "smoke" \
-            || { echo "config did not resolve beside the executable"; exit 1; }
-          echo "smoke test passed"
+      - name: Remove the signing key
+        if: always()
+        shell: pwsh
+        run: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'update-signing-key.pem')
 
-      - name: Attach to the release
-        uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
-        with:
-          files: |
-            dist/UnifiStockWatcher.exe
-            dist/UnifiStockWatcher-cli.exe
-          body_path: ${{ github.workspace }}/.github/release-note.md
-          append_body: true
+      - name: Verify latest.json against the key built into the app
+        shell: pwsh
+        run: python scripts/verify_release.py dist $env:GITHUB_REF_NAME
 
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: UnifiStockWatcher-windows
-          path: dist/*.exe
+      - name: Self-test the portable build
+        shell: pwsh
+        run: ./scripts/test_portable.ps1
+
+      - name: Install, self-test and uninstall this installer
+        shell: pwsh
+        run: ./scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version $env:GITHUB_REF_NAME.TrimStart('v')
+
+      - name: Publish the GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = $env:GITHUB_REF_NAME
+          $notes = "release-notes/$tag.md"
+          $opts = @('--title', "UniFi Stock Watcher $($tag.TrimStart('v'))", '--verify-tag')
+          if (Test-Path $notes) { $opts += @('--notes-file', $notes) } else { $opts += '--generate-notes' }
+          gh release create $tag dist/UnifiStockWatcher-Setup.exe dist/UnifiStockWatcher-win64.zip dist/latest.json dist/SHA256SUMS.txt @opts

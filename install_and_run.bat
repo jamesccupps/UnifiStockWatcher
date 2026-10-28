@@ -1,18 +1,24 @@
 @echo off
 setlocal
 cd /d "%~dp0"
-title UniFi Stock Watcher
+title UniFi Stock Watcher (from source)
 
 echo ============================================================
 echo   UniFi Stock Watcher
 echo ============================================================
 echo.
 
-python --version >nul 2>&1
+rem The py launcher first: a bare "python" on PATH can be another program's
+rem copy (Inkscape, GIMP...) rather than the one you installed.
+set "PY=py -3"
+%PY% --version >nul 2>&1
+if errorlevel 1 set "PY=python"
+%PY% --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python not found.
     echo Please install Python 3.10+ from https://python.org
-    echo Make sure to check "Add Python to PATH" during install.
+    echo Or download the ready-made app, no Python needed:
+    echo   https://github.com/jamesccupps/UnifiStockWatcher/releases/latest
     echo.
     pause
     exit /b 1
@@ -21,7 +27,7 @@ if errorlevel 1 (
 set /a attempts=0
 
 echo Installing dependencies...
-python -m pip install -r requirements.txt --quiet
+%PY% -m pip install -r requirements.txt --quiet
 if errorlevel 1 (
     echo.
     echo WARNING: dependency install failed. Continuing anyway --
@@ -61,14 +67,14 @@ goto menu
 :gui
 echo.
 echo Launching GUI...
-start "" pythonw unifi_watcher_gui.py
+if "%PY%"=="py -3" (start "" pyw -3 unifi_watcher_gui.py) else (start "" pythonw unifi_watcher_gui.py)
 exit /b 0
 
 :cli
 echo.
 echo Starting watcher... Leave this window open. Press Ctrl+C to stop.
 echo.
-python unifi_watcher.py
+%PY% unifi_watcher.py
 pause
 exit /b 0
 
@@ -76,12 +82,12 @@ exit /b 0
 echo.
 echo Starting product picker, then watcher...
 echo.
-python unifi_watcher.py --setup
+%PY% unifi_watcher.py --setup
 pause
 exit /b 0
 
 :selftest
 echo.
-python unifi_watcher.py --test
+%PY% unifi_watcher.py --test
 pause
 exit /b 0

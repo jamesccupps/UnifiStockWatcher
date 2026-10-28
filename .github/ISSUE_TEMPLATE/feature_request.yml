@@ -1,0 +1,19 @@
+name: Idea or feature request
+description: Something UniFi Stock Watcher could do, or do better
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The app tries to stay simple: tell you, quickly and reliably, when something you want is back in stock. Ideas that help with that are the most welcome.
+  - type: textarea
+    id: what
+    attributes:
+      label: What would you like it to do?
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What would it help with?
+      description: What you're watching for, and what you do today instead.

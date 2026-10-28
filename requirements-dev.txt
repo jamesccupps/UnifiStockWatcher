@@ -1,0 +1,6 @@
+# Development and release tools, pinned so CI builds are reproducible.
+# Dependabot proposes newer versions; the app itself needs only requirements.txt.
+pytest==9.2.0
+pyflakes==4.1.0
+pyinstaller==6.22.3
+cryptography==50.0.2

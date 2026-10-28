@@ -1,7 +1,8 @@
 """GUI behaviour.
 
 Skipped where Tk cannot open a display. Windows never sees that; Linux CI
-needs xvfb, which the workflow provides.
+needs xvfb, which the workflow provides. The app runs without its tray icon
+and without update checks here.
 """
 
 import logging
@@ -16,6 +17,7 @@ from conftest import product
 tk = pytest.importorskip("tkinter")
 
 import unifi_watcher_gui as gui  # noqa: E402
+import updater  # noqa: E402
 
 logging.getLogger("unifi_watcher").setLevel(logging.CRITICAL)
 
@@ -37,16 +39,10 @@ def _session_app():
     destroying* a root per test progressively breaks Tcl's library-path state,
     so a later Tk() dies with `invalid command name "tcl_findLibrary"` or
     `Can't find a usable init.tcl` - intermittently, in whichever test runs
-    next, which is why the failure never pointed at its own cause. Python 3.12
-    tightened tkinter finalisation, so it hit 3.10 and 3.11 first; under load
-    a second interpreter has failed on 3.12 too.
-
-    So: one root, created once, reused by every test, never destroyed until
-    the module is done. It doubles as the availability probe, so nothing is
-    churned just to find out whether Tk works.
+    next. So: one root, created once, reused by every test.
     """
     try:
-        a = gui.UnifiWatcherApp()
+        a = gui.UnifiWatcherApp(use_tray=False, check_updates=False)
     except Exception as e:                            # pragma: no cover
         pytest.skip(f"Tk unavailable: {e}")
         return
@@ -65,23 +61,34 @@ def app(_session_app, isolated_files, monkeypatch):
     monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
     monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [])
     monkeypatch.setattr(gui, "refresh_category_coverage", lambda *a, **k: [])
+    # A watched item missing from the (empty) fake catalog falls back to
+    # check_slug, whose retries sleep 1 s and 2 s against the blocked network.
+    monkeypatch.setattr(gui, "check_slug", lambda *a, **k: (False, None))
+    monkeypatch.setattr(gui, "play_sound", lambda: None)
+    monkeypatch.setattr(gui.webbrowser, "open", lambda *a, **k: None)
+    monkeypatch.setattr(gui, "notify_windows", lambda *a, **k: None)
 
     a = _session_app
     _quiesce(a)
     a._wake.clear()
     a.watched = []
+    a.status = {}
     a.notified = {}
     a._prev_status = {}
     a._delisted = set()
     a._closed = False
     a.watcher_thread = None
+    a.available_update = None
+    a.update_busy = False
+    a._status_text = ("Idle", "text3")
     a.settings = gui.load_settings()
-    # _on_settings_apply tears down and rebuilds the whole widget tree, which
-    # is exactly the reset we want - and it is production code, so the reset
+    a._log_lines.clear()
+    a._changes.clear()
+    a._change_count = 0
+    a._tab = "watch"
+    # The rebuild is production code (theme changes use it), so the reset
     # path is itself covered.
-    a._on_settings_apply(a.settings)
-    a._clear_log()
-    a._clear_changes()
+    a._rebuild_ui()
 
     yield a
 
@@ -90,11 +97,7 @@ def app(_session_app, isolated_files, monkeypatch):
 
 
 def pump(root, seconds=0.3):
-    """Run a real event loop for a bounded time.
-
-    mainloop() rather than repeated update(): worker threads call after(),
-    which raises "main thread is not in main loop" unless the loop is running.
-    """
+    """Run a real event loop for a bounded time."""
     root.after(int(seconds * 1000), root.quit)
     root.mainloop()
 
@@ -103,8 +106,7 @@ def pump_until(root, predicate, timeout=10.0):
     """Run the event loop until predicate() is true, or timeout.
 
     Preferred over a fixed pump() wherever a background thread has to finish
-    first: a CI runner is far slower than a dev box, and a hardcoded wait
-    turns "slow" into "failed".
+    first: a CI runner is far slower than a dev box.
     """
     deadline = time.monotonic() + timeout
 
@@ -119,42 +121,74 @@ def pump_until(root, predicate, timeout=10.0):
     return predicate()
 
 
+def items(*slugs, fav=()):
+    return [{"title": s.title(), "slug": s, "favourite": s in fav} for s in slugs]
+
+
 # ── watcher state ────────────────────────────────────────────────────────────
 
-def test_applying_settings_while_watching_keeps_the_button_correct(app):
+def test_rebuilding_while_watching_keeps_the_button_correct(app):
     """Regression: the rebuild reset the button, so Start actually stopped it."""
-    app.watched = [{"title": "T", "slug": "s", "favourite": False}]
-    app._refresh_list()
+    app.watched = items("s")
     app.watching = True
-    app.start_btn.config(text="⏹  Stop Watching")
-    app._set_status("Watching…", app.C["green"])
+    app._set_status("Watching", "green")
 
-    app._on_settings_apply(dict(app.settings))
+    app.set_setting("theme", "light" if app.settings["theme"] != "light" else "dark")
 
     assert app.watching is True
-    assert "Stop Watching" in app.start_btn.cget("text")
-    assert app.status_lbl.cget("text") == "Watching…"
+    assert app.start_btn.cget("text") == "Stop watching"
+    assert app.status_lbl.cget("text") == "Watching"
+
+
+def test_a_rebuild_keeps_row_status_and_logs(app):
+    app.watched = items("a", "b")
+    app._refresh_list()
+    app._update_row("a", True, "12:00", "$1.00")
+    app._log("hello there")
+    app._add_change("A", True, "$1.00")
+    app.set_setting("font_size", 12)
+    assert app.rows["a"].pill.cget("text") == "IN STOCK"
+    assert app.rows["b"].pill.cget("text") == "NOT CHECKED"
+    assert any("hello there" in m for _, m, _ in app._log_lines)
+    assert "A" in app.changes_text.get("1.0", "end")
+
+
+def test_removing_an_item_keeps_the_others_status(app):
+    """Regression (2.x): any add or remove reset every row to unknown."""
+    app.watched = items("a", "b")
+    app._refresh_list()
+    app._update_row("a", False, "12:00", "$1.00", "back ~tomorrow")
+    app._remove_item({"slug": "b", "title": "B"})
+    assert app.rows["a"].pill.cget("text") == "SOLD OUT"
+    assert "back ~tomorrow" in app.rows["a"].sub.cget("text")
 
 
 def test_changing_region_clears_the_catalog_baseline(app):
     """Regression: US stock was diffed against EU and reported as changes."""
-    app._prev_status = {"s": (True, "T", "$1.00")}
+    app._prev_status = {"s": (True, "T", "$1.00", None)}
     app.notified = {"s": True}
     app._delisted = {"gone"}
+    app.status = {"s": (True, "1", None, None)}
 
-    new = dict(app.settings)
-    new["region"] = "eu"
-    app._on_settings_apply(new)
+    app.set_setting("region", "eu")
 
     assert app._prev_status == {}
     assert app.notified == {}
     assert app._delisted == set()
+    assert app.status == {}
+    assert unifi_core.load_settings()["region"] == "eu"
 
 
 def test_same_region_keeps_the_baseline(app):
-    app._prev_status = {"s": (True, "T", "$1.00")}
+    app._prev_status = {"s": (True, "T", "$1.00", None)}
     app._on_settings_apply(dict(app.settings))
     assert app._prev_status != {}
+
+
+def test_settings_are_saved_as_they_change(app):
+    app.set_setting("poll_interval", 300)
+    assert unifi_core.load_settings()["poll_interval"] == 300
+    assert "5 minutes" in app.store_lbl.cget("text")
 
 
 def test_force_check_wakes_the_countdown(app):
@@ -164,8 +198,17 @@ def test_force_check_wakes_the_countdown(app):
     assert app._wake.is_set()
 
 
+def test_check_now_when_idle_runs_one_check(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: calls.append(1) or [])
+    app.watched = items("s")
+    app._force_check()
+    assert pump_until(app, lambda: calls and not app.watcher_thread.is_alive())
+    assert calls == [1] and app.watching is False
+
+
 def test_stop_wakes_the_countdown(app):
-    app.watched = [{"title": "T", "slug": "s", "favourite": False}]
+    app.watched = items("s")
     app.watching = True
     app._wake.clear()
     app._toggle_watch()
@@ -184,12 +227,7 @@ def test_wait_returns_immediately_when_woken(app):
 
 
 def test_wake_raised_during_a_cycle_is_not_swallowed(app):
-    """Regression: Check Now pressed *during* the fetch was discarded.
-
-    _wait_for_next_cycle used to clear the event on entry, so a wake raised
-    while the cycle was still working got wiped and the watcher sat out the
-    whole interval - the same defect the original _force_flag had.
-    """
+    """Regression: Check Now pressed *during* the fetch was discarded."""
     app.watching = True
     app._wake.set()                      # as if F5 landed mid-cycle
     started = time.monotonic()
@@ -201,7 +239,6 @@ def test_wake_raised_during_a_cycle_is_not_swallowed(app):
 def test_each_cycle_starts_from_a_clear_wake(app, monkeypatch):
     """The clear belongs at the start of the work, not the start of the wait."""
     seen = []
-    monkeypatch.setattr(gui, "get_build_id", lambda *a, **k: "bid")
     monkeypatch.setattr(gui, "fetch_all_products",
                         lambda *a, **k: seen.append(app._wake.is_set()) or [])
     app.settings["poll_interval"] = 1
@@ -214,13 +251,34 @@ def test_each_cycle_starts_from_a_clear_wake(app, monkeypatch):
     assert seen[:2] == [False, False], seen
 
 
-def test_close_stops_watching_and_flushes(app, monkeypatch):
-    flushed = []
-    destroyed = []
+def test_workers_never_call_tk(app, monkeypatch):
+    """Worker results reach the window through the queue only: a Tk call from
+    another thread waits for the main loop and, after close, raises."""
+    called_from = []
+    real_after = app.after
+
+    def spy(*a, **k):
+        called_from.append(threading.current_thread().name)
+        return real_after(*a, **k)
+    monkeypatch.setattr(app, "after", spy)
+    app.watched = items("s")
+    monkeypatch.setattr(gui, "fetch_all_products",
+                        lambda *a, **k: [product("s", status="Available")])
+    t = threading.Thread(target=app._cycle, name="unifi-watch-test")
+    t.start()
+    t.join(5)
+    assert all(n == "MainThread" for n in called_from), called_from
+    pump_until(app, lambda: "s" in app.status)
+    assert app.status["s"][0] is True
+
+
+def test_closing_without_a_tray_quits_and_flushes(app, monkeypatch):
+    flushed, destroyed = [], []
     monkeypatch.setattr(gui.stock_history, "flush", lambda: flushed.append(1))
     # The app is shared across this module, so record the teardown rather than
     # actually destroying the interpreter out from under the other tests.
     monkeypatch.setattr(type(app), "destroy", lambda self: destroyed.append(1))
+    app.tray = None
     app.watching = True
     app._on_close()
     assert app.watching is False
@@ -229,11 +287,82 @@ def test_close_stops_watching_and_flushes(app, monkeypatch):
     assert destroyed == [1]
 
 
+def test_closing_with_a_tray_keeps_watching(app, monkeypatch):
+    class FakeTray:
+        def __init__(self):
+            self.notes = []
+
+        def notify(self, *a, **k):
+            self.notes.append(a)
+
+        def set_state(self, *a):
+            pass
+
+    monkeypatch.setattr(app, "withdraw", lambda: None)
+    app.tray = FakeTray()
+    app._tray_hint_shown = False
+    app.watching = True
+    try:
+        app._on_close()
+        assert app.watching is True
+        assert len(app.tray.notes) == 1          # the one-time hint
+        app._on_close()
+        assert len(app.tray.notes) == 1
+    finally:
+        app.tray = None
+        app.watching = False
+
+
+# ── alerts ───────────────────────────────────────────────────────────────────
+
+def test_an_item_coming_back_alerts_once(app, monkeypatch):
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    app.watched = items("s")
+    catalog = [product("s", status="Available")]
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: catalog)
+    app._cycle()
+    app._cycle()
+    pump(app, 0.2)
+    assert len(notes) == 1
+    assert "s" in notes[0][2]                     # the product's URL
+
+
+def test_a_quick_check_and_a_cycle_together_alert_once(app, monkeypatch):
+    """Regression: both saw notified=False on their own thread and posted."""
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    item = items("s")[0]
+    app._maybe_alert(item, True)
+    app._maybe_alert(item, True)
+    pump(app, 0.2)
+    assert len(notes) == 1
+
+
+def test_an_alert_is_counted(app, monkeypatch):
+    before = gui.stock_history.get_stats()["alerts"]
+    monkeypatch.setattr(app, "_notify", lambda *a: None)
+    app._on_in_stock(items("s")[0])
+    assert gui.stock_history.get_stats()["alerts"] == before + 1
+
+
+def test_alert_settings_are_honoured(app, monkeypatch):
+    notes, opened = [], []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    monkeypatch.setattr(gui.webbrowser, "open", lambda url: opened.append(url))
+    app.settings.update(notifications=False, auto_open_url=False)
+    app._on_in_stock(items("s")[0])
+    assert notes == [] and opened == []
+    app.settings.update(notifications=True, auto_open_url=True)
+    app._on_in_stock(items("s")[0])
+    assert len(notes) == 1 and opened == [unifi_core.product_url("s", app.settings["region"])]
+
+
 # ── delisted items ───────────────────────────────────────────────────────────
 
 def test_a_delisted_item_is_checked_once(app, monkeypatch):
     """Regression: ProductNotFound was retried with backoff every cycle."""
-    app.watched = [{"title": "Gone", "slug": "gone", "favourite": False}]
+    app.watched = items("gone")
     app._refresh_list()
     app.settings["poll_interval"] = 1
 
@@ -248,118 +377,110 @@ def test_a_delisted_item_is_checked_once(app, monkeypatch):
     threading.Thread(target=app._watch_loop, daemon=True,
                      name="unifi-watch-test").start()
     assert pump_until(app, lambda: "gone" in app._delisted)
-    # give the loop room to wrongly re-check across further cycles
-    pump(app, 2.5)
-    app.watching = False
-    app._wake.set()
+    pump(app, 2.5)                       # room to wrongly re-check
+    _quiesce(app)
 
     assert calls == [1]
-    assert "gone" in app._delisted
-    assert app.rows["gone"].badge.cget("text") == "DELISTED"
+    assert app.rows["gone"].pill.cget("text") == "DELISTED"
+
+
+# ── store-wide changes ───────────────────────────────────────────────────────
+
+def test_store_wide_changes_reach_the_feed_and_history(app, monkeypatch):
+    state = {"x": "SoldOut"}
+    monkeypatch.setattr(gui, "fetch_all_products",
+                        lambda *a, **k: [product("x", "Xeno", status=state["x"])])
+    app._cycle()                         # baseline
+    state["x"] = "Available"
+    app._cycle()
+    pump(app, 0.2)
+    assert app._change_count == 1
+    assert "Xeno" in app.changes_text.get("1.0", "end")
+    ev = gui.stock_history.get_events(limit=1)[0]
+    assert ev["slug"] == "x" and ev["in_stock"] is True and ev["watched"] is False
 
 
 # ── mouse wheel ──────────────────────────────────────────────────────────────
 
-def test_wheel_scrolls_when_the_pointer_is_over_a_row(app):
-    """Regression: scrolling did nothing at all.
+def test_wheel_binding_survives_leaving_the_container(app):
+    """Regression: the binding was installed on <Enter> of the container and
+    removed on <Leave>; moving onto a child row fires <Leave>."""
+    app.watched = items("s")
+    app._refresh_list()
+    assert app.bind("<MouseWheel>"), "no wheel binding on the toplevel"
+    app.list_canvas.event_generate("<Enter>")
+    app.update()
+    app.list_frame.event_generate("<Leave>")
+    app.update()
+    assert app.bind("<MouseWheel>")
+    assert gui._wheel_target(app.rows["s"].title_lbl) is app.list_canvas
 
-    The binding was installed on <Enter> and torn down on <Leave> of the
-    container. Moving the pointer onto a child row fires <Leave> on that
-    container, so the binding was removed exactly where the user scrolls —
-    and the pointer is essentially always over a row.
-    """
-    app.watched = [{"title": f"P{i:02d}", "slug": f"s{i}", "favourite": False}
-                   for i in range(30)]
+
+def test_wheel_target_resolves_through_nested_widgets(app):
+    app.watched = items("s")
+    app._refresh_list()
+    assert gui._wheel_target(app.rows["s"].title_lbl) is app.list_canvas
+    assert gui._wheel_target(app.list_canvas) is app.list_canvas
+    assert gui._wheel_target(app.log_text) is None      # not a scroll area
+
+
+def test_wheel_scrolls_when_the_pointer_is_over_a_row(app):
+    """Regression: scrolling did nothing at all (see bind_wheel)."""
+    app.watched = items(*[f"s{i}" for i in range(30)])
     app._refresh_list()
     app.deiconify()
     app.geometry("700x800+40+40")
     try:
         cv = app.list_canvas
-        # Wait for the window manager to actually map the window; winfo_rootx
-        # and winfo_containing are meaningless until it has.
         under = px = py = None
         for _ in range(100):
-            app.update_idletasks()
             app.update()
             if cv.winfo_width() > 1 and cv.winfo_height() > 1:
                 px = cv.winfo_rootx() + cv.winfo_width() // 2
-                py = cv.winfo_rooty() + cv.winfo_height() // 2
+                py = cv.winfo_rooty() + cv.winfo_height() // 3
                 under = app.winfo_containing(px, py)
-                if under is not None:
+                if under is not None and under is not cv:
                     break
             time.sleep(0.02)
-        if under is None:
+        if under is None or under is cv:
             pytest.skip("window never mapped; no usable on-screen geometry")
-
-        # the pointer is over a row, not the canvas
-        assert under is not cv
         assert gui._wheel_target(under) is cv
-
         before = cv.yview()[0]
-        under.event_generate("<MouseWheel>", delta=-120,
-                             rootx=px, rooty=py, x=5, y=5)
+        under.event_generate("<MouseWheel>", delta=-120, rootx=px, rooty=py, x=5, y=5)
         app.update()
         assert cv.yview()[0] > before, "wheel over a row did not scroll"
-
-        mid = cv.yview()[0]
-        under.event_generate("<MouseWheel>", delta=120,
-                             rootx=px, rooty=py, x=5, y=5)
-        app.update()
-        assert cv.yview()[0] < mid, "wheel up did not scroll back"
     finally:
         app.withdraw()
-
-
-def test_wheel_binding_survives_leaving_the_container(app):
-    """Regression, without needing on-screen geometry.
-
-    The old binding was installed on <Enter> of the container and removed on
-    <Leave>. Moving onto a child row fires <Leave> on the container, so the
-    binding vanished exactly where scrolling happens. Crossing events need no
-    real pointer, so this check is deterministic where the geometry-based one
-    can only skip.
-    """
-    app.watched = [{"title": "P", "slug": "s", "favourite": False}]
-    app._refresh_list()
-
-    assert app.bind("<MouseWheel>"), "no wheel binding on the toplevel"
-
-    app.list_canvas.event_generate("<Enter>")
-    app.update()
-    app.list_frame.event_generate("<Leave>")     # i.e. pointer moved onto a row
-    app.update()
-
-    assert app.bind("<MouseWheel>"), \
-        "leaving the container tore down the wheel binding"
-    assert gui._wheel_target(app.rows["s"].title_lbl) is app.list_canvas
-
-
-def test_wheel_target_resolves_through_nested_widgets(app):
-    app.watched = [{"title": "P", "slug": "s", "favourite": False}]
-    app._refresh_list()
-    row = app.rows["s"]
-    # a deeply nested child still resolves to the scrolling canvas
-    assert gui._wheel_target(row.title_lbl) is app.list_canvas
-    assert gui._wheel_target(app.list_canvas) is app.list_canvas
-    assert gui._wheel_target(app.log_text) is None      # not a scroll area
 
 
 # ── text widget bounds ───────────────────────────────────────────────────────
 
 def test_activity_log_is_bounded(app):
+    app._set_bottom("activity")
     for i in range(gui.MAX_LOG_LINES + 250):
         app._log(f"line {i}")
     lines = int(app.log_text.index("end-1c").split(".")[0])
     assert lines == gui.MAX_LOG_LINES
+    assert len(app._log_lines) == gui.MAX_LOG_LINES
 
 
 def test_changes_feed_is_bounded_but_counts_everything(app):
+    app._set_bottom("changes")
     total = gui.MAX_CHANGE_LINES + 100
     for i in range(total):
         app._add_change(f"P{i}", i % 2 == 0)
     lines = int(app.changes_text.index("end-1c").split(".")[0])
     assert lines == gui.MAX_CHANGE_LINES
-    assert app._changes_count_lbl.cget("text") == f"({total})"
+    assert app._changes_count_lbl.cget("text") == f"{total} this session"
+
+
+def test_the_feed_and_log_switch_without_losing_lines(app):
+    app._log("a log line")
+    app._add_change("Changed", True)
+    app._set_bottom("activity")
+    assert "a log line" in app.log_text.get("1.0", "end")
+    app._set_bottom("changes")
+    assert "Changed" in app.log_text.get("1.0", "end")
 
 
 # ── browse dialog ────────────────────────────────────────────────────────────
@@ -373,13 +494,10 @@ def browse(app, monkeypatch):
         p["_category"] = "category/all-switching"
     monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: catalog)
     picks = []
-    d = gui.BrowseDialog(app, [{"slug": "oos-c", "title": "Charlie"}],
-                         picks.extend, app.C, app.settings)
+    d = gui.BrowseDialog(app, [{"slug": "oos-c", "title": "Charlie"}], picks.extend)
     d.withdraw()
-    d.all_prods = sorted(catalog, key=lambda p: p["title"])
     d.picks = picks
-    pump_until(app, lambda: d._filter_job is None)
-    d.all_prods = sorted(catalog, key=lambda p: p["title"])
+    pump_until(app, lambda: d.all_prods and d._filter_job is None)
     yield d
     try:
         d.destroy()
@@ -388,85 +506,79 @@ def browse(app, monkeypatch):
         pass
 
 
-
 def shown(dialog):
-    """Rows currently placed by the geometry manager.
-
-    winfo_ismapped() is False for everything inside an unmapped Toplevel, so
-    it cannot distinguish shown from hidden rows in a headless test.
-    """
-    return [r["cb"].cget("text").strip() for r in dialog._row_pool
-            if r["frame"].winfo_manager()]
+    return [dialog.tree.item(i, "values")[0] for i in dialog.tree.get_children()]
 
 
 def test_browse_defaults_to_out_of_stock_only(browse):
     browse._filter()
-    assert shown(browse) == ["Bravo", "Charlie (watching)"]
+    assert shown(browse) == ["Bravo", "Charlie"]
 
 
 def test_browse_show_in_stock_includes_everything(browse):
     browse._stock_var.set(True)
     browse._filter()
-    assert shown(browse) == ["Alpha", "Bravo", "Charlie (watching)"]
+    assert shown(browse) == ["Alpha", "Bravo", "Charlie"]
 
 
-def test_browse_rows_are_reused_not_recreated(browse):
-    """Regression: every filter pass destroyed and rebuilt every row."""
+def test_browse_narrowing(browse):
     browse._stock_var.set(True)
-    browse._filter()
-    first = [id(r["frame"]) for r in browse._row_pool]
-    for text in ("a", "al", "alp"):
-        browse.q.set(text)
-        browse._filter()
-    browse.q.set("")
-    browse._filter()
-    assert [id(r["frame"]) for r in browse._row_pool] == first
-
-
-def test_browse_narrowing_hides_surplus_rows(browse):
-    browse._stock_var.set(True)
-    browse._filter()
     browse.q.set("alpha")
     browse._filter()
     assert shown(browse) == ["Alpha"]
-    assert sum(1 for r in browse._row_pool
-               if not r["frame"].winfo_manager()) == 2
 
 
 def test_browse_selection_survives_filtering(browse):
     browse._stock_var.set(True)
     browse._filter()
-    browse.check_vars["oos-b"].set(True)
+    browse._toggle("oos-b")
     browse.q.set("alpha")
     browse._filter()
     browse.q.set("")
     browse._filter()
-    assert browse.check_vars["oos-b"].get() is True
+    assert "oos-b" in browse.selected
+    assert str(browse.tree.item("oos-b", "image")[0]) == str(app_image(browse, "check_on"))
 
 
-def test_browse_disables_already_watched_rows(browse):
+def app_image(dialog, name):
+    return dialog.T.image(name)
+
+
+def test_browse_watched_rows_cannot_be_ticked(browse):
     browse._filter()
-    row = next(r for r in browse._row_pool
-               if "Charlie" in r["cb"].cget("text"))
-    assert row["cb"].cget("state") == "disabled"
+    browse._toggle("oos-c")
+    assert "oos-c" not in browse.selected
+    assert browse.tree.item("oos-c", "values")[3] == "On your watch list"
 
 
 def test_browse_confirm_excludes_already_watched(browse):
     browse._stock_var.set(True)
     browse._filter()
-    browse.check_vars["oos-b"].set(True)
-    browse.check_vars["oos-c"].set(True)      # already watched
+    browse._toggle("oos-b")
+    browse.selected.add("oos-c")                   # forced past the guard
     browse._confirm()
     assert [p["slug"] for p in browse.picks] == ["oos-b"]
 
 
-def test_browse_search_is_debounced(browse, app):
-    # Let the dialog's own background fetch land first; its _on_fetched also
-    # calls _filter and would otherwise be counted.
-    pump_until(app, lambda: browse._filter_job is None and browse.filtered)
+def test_browse_add_button_follows_the_selection(browse):
+    browse._filter()
+    assert str(browse.add_btn.cget("state")) == "disabled"
+    browse._toggle("oos-b")
+    assert str(browse.add_btn.cget("state")) == "normal"
+
+
+def test_browse_sorts_by_price(browse):
     browse._stock_var.set(True)
     browse._filter()
+    browse._sort_by("price")
+    assert shown(browse) == ["Alpha", "Bravo", "Charlie"]
+    browse._sort_by("price")
+    assert shown(browse) == ["Charlie", "Bravo", "Alpha"]
 
+
+def test_browse_search_is_debounced(browse, app):
+    browse._stock_var.set(True)
+    browse._filter()
     calls = []
     real = browse._filter
     browse._filter = lambda: (calls.append(1), real())
@@ -474,9 +586,24 @@ def test_browse_search_is_debounced(browse, app):
         browse.q.set(text)
     assert calls == []                      # nothing ran while typing
     assert pump_until(app, lambda: len(calls) >= 1)
-    pump(app, 0.4)                          # nothing further should arrive
+    pump(app, 0.4)
     assert len(calls) == 1                  # one coalesced pass
     assert shown(browse) == ["Bravo"]
+
+
+def test_browse_renders_a_full_catalog_quickly(app, monkeypatch):
+    catalog = [product(f"p{i}", f"Product {i:03d}", status="SoldOut") for i in range(600)]
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: catalog)
+    d = gui.BrowseDialog(app, [], lambda *_: None)
+    d.withdraw()
+    try:
+        assert pump_until(app, lambda: d.all_prods)
+        started = time.perf_counter()
+        d._filter()
+        assert len(d.tree.get_children()) == 600
+        assert time.perf_counter() - started < 1.5
+    finally:
+        d.destroy()
 
 
 def test_browse_reports_fetch_failure(app, monkeypatch):
@@ -485,19 +612,31 @@ def test_browse_reports_fetch_failure(app, monkeypatch):
         raise RuntimeError("store unreachable")
 
     monkeypatch.setattr(gui, "get_build_id", boom)
-    d = gui.BrowseDialog(app, [], lambda *_: None, app.C, app.settings)
+    d = gui.BrowseDialog(app, [], lambda *_: None)
     d.withdraw()
-    pump_until(app, lambda: "Error" in d.status_lbl.cget("text"))
+    pump_until(app, lambda: "unreachable" in d.status_lbl.cget("text"))
     assert "store unreachable" in d.status_lbl.cget("text")
     d.destroy()
 
 
-def test_wheel_binding_does_not_outlive_the_dialog(app, monkeypatch):
-    """Regression: bind_all left a dead canvas receiving wheel events."""
-    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [])
+def test_browse_closed_mid_fetch_is_quiet(app, monkeypatch):
     errors = []
     app.report_callback_exception = lambda *a: errors.append(a)
-    d = gui.BrowseDialog(app, [], lambda *_: None, app.C, app.settings)
+    gate = threading.Event()
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: gate.wait(5) and [])
+    d = gui.BrowseDialog(app, [], lambda *_: None)
+    d.withdraw()
+    d.destroy()
+    gate.set()
+    pump(app, 0.4)
+    assert errors == []
+
+
+def test_wheel_binding_does_not_outlive_the_dialog(app, monkeypatch):
+    """Regression: bind_all left a dead canvas receiving wheel events."""
+    errors = []
+    app.report_callback_exception = lambda *a: errors.append(a)
+    d = gui.BrowseDialog(app, [], lambda *_: None)
     d.withdraw()
     pump(app, 0.3)
     d.destroy()
@@ -508,27 +647,112 @@ def test_wheel_binding_does_not_outlive_the_dialog(app, monkeypatch):
     assert errors == []
 
 
-# ── watched row ──────────────────────────────────────────────────────────────
+# ── watched rows ─────────────────────────────────────────────────────────────
 
 def test_watched_row_shows_stock_states(app):
-    app.watched = [{"title": "T", "slug": "s", "favourite": False}]
+    app.watched = items("s")
     app._refresh_list()
     row = app.rows["s"]
 
-    row.update_status(True, "12:00:00", "$99.00")
-    assert row.badge.cget("text") == "IN STOCK"
+    row.update_status(True, "12:00", "$99.00")
+    assert row.pill.cget("text") == "IN STOCK"
+    assert row.open_btn.winfo_manager() == "grid"
+    assert str(row.cget("style")) == "Hot.Tile.TFrame"
 
-    row.update_status(False, "12:01:00", "$99.00")
-    assert row.badge.cget("text") == "OUT OF STOCK"
+    row.update_status(False, "12:01", "$99.00", "back ~7 Sep")
+    assert row.pill.cget("text") == "SOLD OUT"
+    assert row.open_btn.winfo_manager() == ""
+    assert "back ~7 Sep" in row.sub.cget("text")
+
+    row.update_status(False, "12:02", None, "coming soon  ·  back ~3 days")
+    assert row.pill.cget("text") == "COMING SOON"
 
     row.mark_delisted()
-    assert row.badge.cget("text") == "DELISTED"
+    assert row.pill.cget("text") == "DELISTED"
     assert row.in_stock is None
 
 
 def test_favourites_are_listed_first(app):
-    app.watched = [{"title": "Plain", "slug": "p", "favourite": False},
-                   {"title": "Starred", "slug": "s", "favourite": True}]
+    app.watched = items("plain", "starred", fav=("starred",))
     app._refresh_list()
-    assert set(app.rows) == {"p", "s"}
-    assert "1 ★" in app.title()
+    order = [w for w in app.list_frame.pack_slaves() if isinstance(w, gui.WatchedRow)]
+    assert [r.item["slug"] for r in order] == ["starred", "plain"]
+
+
+def test_toggling_a_favourite_is_saved(app):
+    app.watched = items("s")
+    app._refresh_list()
+    app._toggle_fav(app.watched[0])
+    assert unifi_core.load_watched()[0]["favourite"] is True
+
+
+def test_the_title_counts_what_is_in_stock(app):
+    app.watched = items("a", "b")
+    app._refresh_list()
+    app._update_row("a", True, "12:00")
+    assert "1 in stock" in app.title()
+
+
+# ── tabs, history, updates ───────────────────────────────────────────────────
+
+def test_tabs_switch(app):
+    for key in ("history", "settings", "watch"):
+        app._show_tab(key)
+        assert app._tab == key
+
+
+def test_history_tab_lists_changes(app):
+    gui.stock_history.clear()
+    gui.stock_history.record("a", "Alpha", False)
+    gui.stock_history.record("a", "Alpha", True)
+    gui.stock_history.record("x", "Xeno", True, watched=False)
+    app._show_tab("history")
+    h = app._history_widget
+    h.watched_only.set(True)
+    h.refresh()
+    changes = [h.tree.item(i, "values")[2] for i in h.tree.get_children()]
+    assert changes == ["▲  In stock", "Added: sold out"]
+    h.watched_only.set(False)
+    h.refresh()
+    assert len(h.tree.get_children()) == 3
+
+
+def test_friendly_time():
+    from datetime import datetime
+    now = datetime(2026, 10, 28, 18, 0)
+    assert gui.friendly_time("2026-10-28T16:50:00", now) == "Today  16:50"
+    assert gui.friendly_time("2026-10-27T09:05:00", now) == "Yesterday  09:05"
+    assert gui.friendly_time("2026-03-02T09:05:00", now) == "2 Mar  09:05"
+    assert gui.friendly_time("2024-03-02T09:05:00", now) == "2 Mar 2024"
+    assert gui.friendly_time("junk", now) == "junk"
+
+
+def test_an_available_update_shows_a_banner(app):
+    app.available_update = updater.Update("9.9.9", None, "installed",
+                                          {"file": "x", "size": 1, "sha256": "0" * 64}, "src")
+    app._refresh_update_ui()
+    texts = [w.cget("text") for b in app.banner_holder.winfo_children()
+             for w in b.winfo_children() if "text" in w.keys()]
+    assert any("9.9.9" in t for t in texts)
+    assert "Install and restart" in texts
+    app._dismiss_banner()
+    assert app.banner_holder.winfo_children() == []
+
+
+def test_a_failed_update_check_is_reported_not_raised(app, monkeypatch):
+    def boom(*a, **k):
+        raise updater.UpdateError("latest.json isn't signed with the key this app trusts")
+    monkeypatch.setattr(updater, "check", boom)
+    app.check_for_updates()
+    assert pump_until(app, lambda: not app.update_busy)
+    assert "isn't signed" in app.update_status
+    assert app.available_update is None
+
+
+def test_the_tray_menu_reflects_state(app):
+    app.watched = items("s")
+    labels = [i.text for i in app._tray_menu()]
+    assert "Start watching" in labels and "Quit" in labels
+    app.watching = True
+    assert "Stop watching" in [i.text for i in app._tray_menu()]
+    app.watching = False

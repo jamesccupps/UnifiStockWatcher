@@ -1,0 +1,6 @@
+# Blank issues stay allowed: the app's "Report a problem…" opens one with the version filled in.
+blank_issues_enabled: true
+contact_links:
+  - name: Security problem
+    url: https://github.com/jamesccupps/UnifiStockWatcher/security/advisories/new
+    about: Please report it privately (see SECURITY.md), not in a public issue.

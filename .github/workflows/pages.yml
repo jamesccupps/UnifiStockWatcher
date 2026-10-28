@@ -1,0 +1,52 @@
+# The project page on GitHub Pages (https://jamesccupps.github.io/UnifiStockWatcher/): site/ plus
+# the app icon. Runs when the page, its pictures or the icon change on main, or by hand. The page
+# asks GitHub for the latest version itself and its download links point at releases/latest, so a
+# release doesn't need a new deploy. Needs Settings → Pages → Source set to "GitHub Actions".
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "assets/icon.png", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Make the site
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: The page and its pictures
+        run: |
+          mkdir pages
+          cp -r site/. pages/
+          cp assets/icon.png pages/images/icon.png
+          find pages | sort
+
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: pages
+
+  deploy:
+    name: Publish
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

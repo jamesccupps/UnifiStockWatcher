@@ -1,8 +1,15 @@
-# Runtime data (user-specific, generated at runtime)
+# Runtime data (user-specific; a source run keeps it in %APPDATA%, but a
+# portable marker would put it here)
 watched_items.json
 settings.json
 stock_history.json
 category_cache.json
+selftest.json
+*.log
+/portable.txt
+
+# Never commit a signing key
+*.pem
 
 # Python
 __pycache__/
@@ -10,18 +17,19 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-dist/
-build/
 *.egg
-
-# Virtual environments
 venv/
 .venv/
 env/
 
-# IDE
+# Build output (scripts/build_windows.py)
+dist/
+build/
+
+# IDE and tools
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 *~

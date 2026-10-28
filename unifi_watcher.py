@@ -11,7 +11,6 @@ Commands:
 
 import sys
 import time
-import logging
 import webbrowser
 from datetime import datetime
 
@@ -22,18 +21,14 @@ if not ensure_requests():
     sys.exit(1)
 
 from unifi_core import (
-    __version__, BASE_DIR, STORE_BASE, STORE_REGIONS,
+    __version__, APP_NAME, BASE_DIR, STORE_REGIONS,
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
-    refresh_category_coverage,
+    refresh_category_coverage, product_url, is_portable,
     is_available, get_price, check_slug,
     load_watched, save_watched, stock_history,
-    notify_windows, play_sound,
+    notify_windows, play_sound, migrate_legacy_files, setup_logging,
 )
-
-
-def store_home(region="us"):
-    return f"{STORE_BASE}/{STORE_REGIONS[region]['path']}"
 
 
 # ── Interactive product picker ────────────────────────────────────────────────
@@ -43,7 +38,7 @@ def run_setup():
     region   = settings.get("region", "us")
 
     print("=" * 60)
-    print(f"  UniFi Stock Watcher v{__version__} — Product Picker")
+    print(f"  {APP_NAME} v{__version__} — Product Picker")
     print(f"  Region: {STORE_REGIONS[region]['label']}")
     print("=" * 60)
     print()
@@ -113,7 +108,7 @@ def run_setup():
         price_str = f" ({w['price']})" if w.get("price") else ""
         print(f"    - {w['title']}{price_str}")
     print()
-    print("  Saved to watched_items.json")
+    print(f"  Saved to {BASE_DIR / 'watched_items.json'}")
     print("=" * 60)
     print()
 
@@ -127,14 +122,14 @@ def test_mode():
     region   = settings.get("region", "us")
 
     print("=" * 60)
-    print(f"  UniFi Stock Watcher v{__version__} — TEST MODE")
+    print(f"  {APP_NAME} v{__version__} — TEST MODE")
     print("=" * 60)
     print()
 
     print("Step 1/3  Firing a test notification…")
     print("          Watch the bottom-right corner of your screen.")
     notify_windows(
-        "TEST: Unifi Stock Watcher works!",
+        f"TEST: {APP_NAME} works!",
         "This is exactly what an in-stock alert looks like."
     )
     if settings.get("sound_alerts", True):
@@ -196,7 +191,7 @@ def main():
         time.sleep(3)
 
     print("=" * 60)
-    print(f"  UniFi Stock Watcher v{__version__} — Running")
+    print(f"  {APP_NAME} v{__version__} — Running")
     print(f"  Region: {STORE_REGIONS[region]['label']}  ·  Interval: {interval}s")
     for w in watched:
         price_str = f" ({w.get('price', '')})" if w.get("price") else ""
@@ -244,7 +239,7 @@ def main():
                 continue
 
             price_str = f" ({price})" if price else ""
-            stock_history.record_check(slug, title, in_stock, price)
+            stock_history.record(slug, title, in_stock, price)
             label = "IN STOCK" if in_stock else "out of stock"
             print(f"          {label:<16}  {title}{price_str}")
 
@@ -256,7 +251,8 @@ def main():
                 if settings.get("sound_alerts", True):
                     play_sound()
                 if settings.get("auto_open_url", True):
-                    webbrowser.open(f"{store_home(region)}/products/{slug}")
+                    webbrowser.open(product_url(slug, region))
+                stock_history.record_alert()
                 notified[slug] = True
                 print("          >>> Notification sent!")
             elif not in_stock:
@@ -270,19 +266,18 @@ def main():
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.WARNING,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        datefmt="%H:%M:%S")
+    if "--version" in sys.argv or "-V" in sys.argv:
+        # Also prints where runtime files live: that answers the common
+        # "where are my settings?" question, and it is what the release
+        # smoke test checks, since a frozen build that resolves its paths
+        # into PyInstaller's temp directory loses the watch list silently.
+        print(f"{APP_NAME} {__version__}")
+        print(f"config directory: {BASE_DIR}")
+        print(f"portable: {'yes' if is_portable() else 'no'}")
+        sys.exit(0)
+    setup_logging(console=True)
+    migrate_legacy_files()
     try:
-        if "--version" in sys.argv or "-V" in sys.argv:
-            # Also prints where runtime files live: that answers the common
-            # "where are my settings?" question, and it is what the release
-            # smoke test checks, since a frozen build that resolves its paths
-            # into PyInstaller's temp directory loses the watch list silently.
-            print(f"UniFi Stock Watcher {__version__}")
-            print(f"config directory: {BASE_DIR}")
-            sys.exit(0)
         if "--test" in sys.argv:
             test_mode()
         elif "--setup" in sys.argv:
