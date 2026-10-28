@@ -1,6 +1,8 @@
 # The workflows' actions are pinned to commits (the version in a comment), and the build tools in
 # requirements-dev.txt to exact versions: Dependabot opens a pull request when a new version comes
-# out. requirements.txt (the app's one dependency) is a range and needs no pull requests.
+# out. requirements.txt (the app's one dependency) is a range, so increase-if-necessary: left alone
+# while the newest version is inside it (Dependabot's default raises the minimum on every release,
+# which only pushes people running from source onto a newer requests for nothing).
 version: 2
 updates:
   - package-ecosystem: github-actions
@@ -14,6 +16,7 @@ updates:
     directory: /
     schedule:
       interval: monthly
+    versioning-strategy: increase-if-necessary
     groups:
       build-tools:
         patterns: ["*"]
