@@ -2,6 +2,17 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased (3.1.0)
+
+### Added
+
+- Alerts on your phone (`webhooks.py`): each in-stock alert also goes to ntfy, Pushover, Discord or Slack, in
+  that service's own format, or as JSON to any address. Settings has the service, its address or keys (each
+  service keeps its own), and a test that shows what the service answered. Sent in order on a thread of its
+  own; no connection, timeouts, 429 and 5xx are retried twice. The Activity view logs each one. Reasons and
+  log lines name the service or host, never the address, which holds the secret for Discord, Slack and ntfy.
+- The CLI sends them too, from the same settings; `--test` sends a test.
+
 ## v3.0.0
 
 ### Added

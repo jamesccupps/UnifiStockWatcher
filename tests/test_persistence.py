@@ -83,12 +83,35 @@ def test_settings_round_trip(isolated_files):
     ("region", "xx"), ("theme", "neon"), ("accent", "red"), ("accent", "#12345"),
     ("font_size", 40), ("notifications", "yes"), ("window", [1, 2, 3]),
     ("window", [0, 0, 0, 10]), ("max_retries", 0), ("auto_start", 1),
+    ("phone_alerts", "on"), ("phone_service", "telegram"), ("ntfy_url", 42),
+    ("ntfy_token", "tk_abc\r\nX-Evil: 1"), ("discord_url", "https://x/" + "a" * 3000),
+    ("webhook_url", "https://x/\n"),
 ])
 def test_an_invalid_setting_falls_back_to_its_default(isolated_files, key, bad):
     """Regression: an unknown region raised KeyError on every store call, and
     a bad colour stopped the window opening at all."""
     write(isolated_files / "settings.json", {key: bad})
     assert unifi_core.load_settings()[key] == unifi_core.DEFAULT_SETTINGS[key]
+
+
+def test_an_invalid_phone_setting_is_logged_without_its_value(isolated_files, caplog):
+    """Webhook addresses and keys are secrets, and the log is what people
+    attach to bug reports."""
+    write(isolated_files / "settings.json",
+          {"discord_url": "https://discord.com/api/webhooks/1/SECRET\n"})
+    with caplog.at_level("WARNING", logger="unifi_watcher"):
+        assert unifi_core.load_settings()["discord_url"] == ""
+    assert "discord_url" in caplog.text and "SECRET" not in caplog.text
+
+
+def test_phone_settings_round_trip(isolated_files):
+    s = unifi_core.load_settings()
+    s.update(phone_alerts=True, phone_service="discord",
+             discord_url="https://discord.com/api/webhooks/1/abc")
+    unifi_core.save_settings(s)
+    loaded = unifi_core.load_settings()
+    assert loaded["phone_alerts"] is True and loaded["phone_service"] == "discord"
+    assert loaded["discord_url"] == "https://discord.com/api/webhooks/1/abc"
 
 
 def test_an_out_of_range_interval_is_clamped(isolated_files):

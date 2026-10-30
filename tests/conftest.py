@@ -20,6 +20,7 @@ os.environ["USW_DATA_DIR"] = tempfile.mkdtemp(prefix="usw-tests-")
 os.environ.pop("USW_UPDATE_URL", None)
 
 import unifi_core  # noqa: E402
+import webhooks  # noqa: E402
 
 
 class FakeResponse:
@@ -99,6 +100,7 @@ def no_network(monkeypatch):
             "test attempted a real HTTP request; mock it, or move the test "
             "into tests_live/")
     monkeypatch.setattr(unifi_core, "get_session", blocked)
+    monkeypatch.setattr(webhooks, "http_post", blocked)
 
 
 def variant(status="Available", amount=19900, currency="USD", **extra):

@@ -50,6 +50,7 @@ import gfx  # noqa: E402
 import theme as theming  # noqa: E402
 import tray as traymod  # noqa: E402
 import updater  # noqa: E402
+import webhooks  # noqa: E402
 
 log = logging.getLogger("unifi_watcher.gui")
 
@@ -63,6 +64,31 @@ INTERVALS = [(15, "15 seconds"), (30, "30 seconds"), (60, "1 minute"),
              (120, "2 minutes"), (300, "5 minutes"), (600, "10 minutes"),
              (1800, "30 minutes"), (3600, "1 hour")]
 THEME_NAMES = [("system", "Use Windows setting"), ("light", "Light"), ("dark", "Dark")]
+
+# What each phone service needs: (setting, title, how to find it, hint in the box).
+PHONE_FIELDS = {
+    "ntfy": [
+        ("ntfy_url", "Topic address",
+         "In the ntfy app, subscribe to a topic with a name nobody would guess, "
+         "then enter its address here.", "https://ntfy.sh/your-topic"),
+        ("ntfy_token", "Access token",
+         "Only for a protected topic on a server of your own.", "Optional: tk_…")],
+    "pushover": [
+        ("pushover_user", "User key", "On pushover.net's front page once you've signed in.", ""),
+        ("pushover_token", "API token",
+         f"Create an application on pushover.net (call it {APP_NAME}) and copy its token.", "")],
+    "discord": [
+        ("discord_url", "Webhook address",
+         "In the channel's settings: Integrations, Webhooks, New Webhook, Copy Webhook URL.",
+         "https://discord.com/api/webhooks/…")],
+    "slack": [
+        ("slack_url", "Webhook address",
+         "An incoming webhook of a Slack app: api.slack.com/apps, Incoming Webhooks.",
+         "https://hooks.slack.com/services/…")],
+    "webhook": [
+        ("webhook_url", "Address",
+         "Each alert is POSTed there as JSON; the README lists its fields.", "https://…")],
+}
 
 
 def resource(name):
@@ -910,8 +936,11 @@ class SettingsTab(ttk.Frame):
         self._switch(r, "sound_alerts")
         r = self._row(sec, "Open the product's page", "In your browser, the moment it's back.")
         self._switch(r, "auto_open_url")
-        r = self._row(sec, "Try it", "Shows what an alert looks like.")
+        r = self._row(sec, "Try it", "Shows what an alert looks like, and sends one to your "
+                                     "phone too if that's on.")
         ttk.Button(r, text="Send a test alert", command=app._test_notif).pack(side="right")
+
+        self._build_phone()
 
         sec = self._section("App")
         if winplatform.IS_WINDOWS:
@@ -983,6 +1012,127 @@ class SettingsTab(ttk.Frame):
                   text=f"{APP_NAME} is free and open source under the MIT license. It is an "
                        "independent project, not made, endorsed or supported by Ubiquiti. "
                        "UniFi is a trademark of Ubiquiti Inc.").pack(fill="x", pady=(S(18), 0))
+
+    # Alerts on your phone ---------------------------------------------------
+
+    def _build_phone(self):
+        app, S = self.app, self.T.S
+        sec = self._section("Alerts on your phone")
+        r = self._row(sec, "Send alerts to your phone",
+                      "Through ntfy, Pushover, Discord or Slack, or as JSON to an address of "
+                      "your own (Home Assistant, n8n, …). This PC sends them, so it has to be "
+                      "on and watching.")
+        self._switch(r, "phone_alerts", on_change=self._phone_toggled)
+        r = self._row(sec, "Service")
+        self._services = {name: k for k, name in webhooks.SERVICES.items()}
+        self.service_box = ttk.Combobox(r, state="readonly", values=list(self._services),
+                                        width=20)
+        self.service_box.set(webhooks.SERVICES[app.settings["phone_service"]])
+        self.service_box.bind("<<ComboboxSelected>>", self._service_changed)
+        self.service_box.pack(side="right")
+        self.phone_fields = ttk.Frame(sec, style="Card.TFrame")
+        self.phone_fields.pack(fill="x")
+        self._phone_savers = []
+        self._build_phone_fields()
+        r = self._row(sec, "Try it", "Sends a test alert to the service now.")
+        ttk.Button(r, text="Send a test", command=self._phone_test).pack(side="right")
+        self.phone_lbl = ttk.Label(r, style="Card.Muted.TLabel", wraplength=S(300),
+                                   justify="right")
+        self.phone_lbl.pack(side="right", padx=(0, S(12)))
+        self._phone_status()
+
+    def _build_phone_fields(self):
+        for w in self.phone_fields.winfo_children():
+            w.destroy()
+        self.phone_fields._rows = 1                  # a divider above the first
+        self._phone_savers = []
+        for key, title, desc, hint in PHONE_FIELDS[self.app.settings["phone_service"]]:
+            self._entry_row(self.phone_fields, key, title, desc, hint)
+
+    def _entry_row(self, section, key, title, desc, hint):
+        """A text setting, the box under its description. Saved a moment after
+        typing stops, and when the box loses focus; whitespace is dropped (none
+        of these addresses or keys has any, and a paste often brings some)."""
+        S = self.T.S
+        if section._rows:
+            ttk.Frame(section, style="Divider.TFrame", height=1).pack(fill="x")
+        section._rows += 1
+        row = ttk.Frame(section, style="Card.TFrame", padding=(S(16), S(11)))
+        row.pack(fill="x")
+        ttk.Label(row, text=title, style="Card.TLabel").pack(anchor="w")
+        ttk.Label(row, text=desc, style="Card.Faint.TLabel", wraplength=S(640),
+                  justify="left").pack(anchor="w", pady=(S(1), 0))
+        var = tk.StringVar(master=row, value=self.app.settings.get(key, ""))
+        entry = ttk.Entry(row, textvariable=var, style="Card.TEntry")
+        entry.pack(fill="x", pady=(S(8), 0))
+        if hint:
+            placeholder(entry, var, hint, self.T)
+        pending = []
+        app = self.app            # timers on the app: they outlive a rebuilt tab
+
+        def save():
+            while pending:
+                app.after_cancel(pending.pop())
+            try:
+                value = "".join(var.get().split())
+            except tk.TclError:
+                return
+            app.set_setting(key, value)
+            self._phone_status()
+
+        def soon(*_):
+            while pending:
+                app.after_cancel(pending.pop())
+            pending.append(app.after(700, save))
+        var.trace_add("write", soon)
+        entry.bind("<FocusOut>", lambda _: save())
+        entry.bind("<Return>", lambda _: save())
+        self._phone_savers.append(save)
+
+    def _phone_toggled(self, on):
+        self.app.set_setting("phone_alerts", on)
+        self._phone_status()
+
+    def _service_changed(self, _):
+        for save in self._phone_savers:
+            save()
+        self.app.set_setting("phone_service", self._services[self.service_box.get()])
+        self._build_phone_fields()
+        self._phone_status()
+
+    def _phone_status(self, text=None, colour="Muted"):
+        """The line beside the test button: what's missing, or `text`."""
+        if text is None:
+            s = self.app.settings
+            why = webhooks.problem(s)
+            if why:
+                text, colour = why, "Amber" if s.get("phone_alerts") else "Muted"
+            elif s.get("phone_alerts"):
+                text = f"Alerts go to {webhooks.label(s)}."
+            else:
+                text = "Ready. Turn it on above."
+        try:
+            self.phone_lbl.config(text=text, style=f"Card.{colour}.TLabel")
+        except (AttributeError, tk.TclError):
+            pass                                     # not built yet, or rebuilt
+
+    def _phone_test(self):
+        for save in self._phone_savers:
+            save()
+        s = self.app.settings
+        why = webhooks.problem(s)
+        if why:
+            self._phone_status(why, "Amber")
+            return
+        self._phone_status(f"Sending to {webhooks.label(s)}…")
+        self.app._send_phone(webhooks.test_alert(s.get("region", "us")), attempts=1,
+                             done=self._phone_tested)
+
+    def _phone_tested(self, where, reason):
+        if reason:
+            self._phone_status(f"Didn't send: {reason}", "Red")
+        else:
+            self._phone_status(f"Sent to {where}. Check your phone.", "Green")
 
     def _build_swatches(self, parent):
         T, S = self.T, self.T.S
@@ -1097,6 +1247,7 @@ class UnifiWatcherApp(tk.Tk):
         self.update_busy    = False
         self._update_dismissed = False
         self._ui_queue      = queue.SimpleQueue()
+        self.phone          = webhooks.Sender()
 
         self._restore_geometry()
         self._build_ui()
@@ -1819,8 +1970,28 @@ class UnifiWatcherApp(tk.Tk):
                          "store. Click to open it.", url)
         if self.settings.get("sound_alerts", True):
             play_sound()
+        if self.settings.get("phone_alerts"):
+            price = self.status.get(item["slug"], (None, None, None))[2]
+            self._send_phone(webhooks.in_stock_alert(item["title"], item["slug"], region,
+                                                     price, is_fav))
         if self.settings.get("auto_open_url", True):
             webbrowser.open(url)
+
+    def _send_phone(self, alert, attempts=webhooks.ATTEMPTS, done=None):
+        """Send to the phone in the background; the outcome goes to the
+        activity log, and to done(label, reason) if given."""
+        self.phone.submit(self.settings, alert, attempts,
+                          lambda where, reason: self._post(self._phone_sent, alert,
+                                                           where, reason, done))
+
+    def _phone_sent(self, alert, where, reason, done=None):
+        what = "the test alert" if alert.test else f"the alert for {alert.product}"
+        if reason:
+            self._log(f"Couldn't send {what} to {where}: {reason}", "err")
+        else:
+            self._log(f"Sent {what} to {where}.", "ok")
+        if done:
+            done(where, reason)
 
     def _notify(self, title, text, url=None):
         if self.tray:
@@ -1966,6 +2137,8 @@ class UnifiWatcherApp(tk.Tk):
                      store_home(self.settings.get("region", "us")))
         if self.settings.get("sound_alerts", True):
             play_sound()
+        if self.settings.get("phone_alerts"):
+            self._send_phone(webhooks.test_alert(self.settings.get("region", "us")), attempts=1)
 
     # ── Updates ───────────────────────────────────────────────────────
 

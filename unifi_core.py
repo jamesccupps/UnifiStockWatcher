@@ -222,6 +222,7 @@ def product_url(slug, region="us"):
 POLL_MIN, POLL_MAX = 15, 3600
 FONT_SIZES = (9, 10, 11, 12, 13, 14)
 THEMES = ("system", "light", "dark")
+PHONE_SERVICES = ("ntfy", "pushover", "discord", "slack", "webhook")   # webhooks.py
 
 DEFAULT_SETTINGS = {
     "poll_interval":      60,
@@ -238,9 +239,23 @@ DEFAULT_SETTINGS = {
     "max_retries":        3,
     "window":             None,     # [x, y, w, h] in screen pixels
     "resume_watching":    False,    # set before an update restarts the app
+    # Alerts on your phone (webhooks.py). Each service keeps its own address
+    # or keys, so trying another one doesn't lose them.
+    "phone_alerts":       False,
+    "phone_service":      "ntfy",
+    "ntfy_url":           "",
+    "ntfy_token":         "",       # only for a protected topic
+    "pushover_user":      "",
+    "pushover_token":     "",
+    "discord_url":        "",
+    "slack_url":          "",
+    "webhook_url":        "",
 }
 
+PHONE_TEXT_KEYS = ("ntfy_url", "ntfy_token", "pushover_user", "pushover_token",
+                   "discord_url", "slack_url", "webhook_url")
 _HEX_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
+_PRINTABLE_RE = re.compile(r"[^\x00-\x1f\x7f]{0,2048}")
 
 
 def _valid_setting(key, value):
@@ -256,6 +271,12 @@ def _valid_setting(key, value):
         return value == "" or (isinstance(value, str) and bool(_HEX_RE.match(value)))
     if key == "font_size":
         return value in FONT_SIZES
+    if key == "phone_service":
+        return value in PHONE_SERVICES
+    if key in PHONE_TEXT_KEYS:
+        # Checked properly when used (webhooks.problem); here only that it's
+        # one line of text, so a damaged file can't put a header in a request.
+        return isinstance(value, str) and bool(_PRINTABLE_RE.fullmatch(value))
     if key == "max_retries":
         return isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 10
     if key == "window":
@@ -323,6 +344,8 @@ def load_settings():
         for key, value in stored.items():
             if key in DEFAULT_SETTINGS and _valid_setting(key, value):
                 merged[key] = value
+            elif key in PHONE_TEXT_KEYS:         # addresses and keys are secrets
+                log.warning("Ignoring invalid setting %s", key)
             elif key in DEFAULT_SETTINGS:
                 log.warning("Ignoring invalid setting %s=%r", key, value)
         # 2.x let the interval be typed freely; keep a sane one rather than

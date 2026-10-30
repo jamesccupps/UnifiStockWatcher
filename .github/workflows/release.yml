@@ -55,7 +55,7 @@ jobs:
 
       - name: Lint and test
         run: |
-          python -m pyflakes unifi_core.py unifi_watcher.py unifi_watcher_gui.py updater.py ed25519.py gfx.py theme.py tray.py winplatform.py
+          python -m pyflakes unifi_core.py unifi_watcher.py unifi_watcher_gui.py updater.py ed25519.py gfx.py theme.py tray.py winplatform.py webhooks.py
           python -m pytest tests --tb=short
 
       - name: Write the signing key for this job

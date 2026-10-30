@@ -29,6 +29,7 @@ from unifi_core import (
     load_watched, save_watched, stock_history,
     notify_windows, play_sound, migrate_legacy_files, setup_logging,
 )
+import webhooks
 
 
 # ── Interactive product picker ────────────────────────────────────────────────
@@ -135,6 +136,11 @@ def test_mode():
     if settings.get("sound_alerts", True):
         play_sound()
     print("          Done. Did a pop-up appear?\n")
+    if settings.get("phone_alerts"):
+        where = webhooks.label(settings)
+        print(f"          Sending a test alert to {where}…")
+        reason = webhooks.send(settings, webhooks.test_alert(region))
+        print(f"          {'FAIL — ' + reason if reason else 'Sent. Is it on your phone?'}\n")
     time.sleep(2)
 
     IN_STOCK_TEST = {"title": "Access Point U7 Pro", "slug": "u7-pro"}
@@ -202,6 +208,13 @@ def main():
 
     notified = {w["slug"]: False for w in watched}
     delisted = set()
+    phone = webhooks.Sender()
+
+    def phone_result(where, reason):
+        if reason:
+            print(f"          WARNING  phone alert to {where} not sent: {reason}")
+        else:
+            print(f"          >>> Sent to {where}")
 
     while True:
         now = datetime.now().strftime("%H:%M:%S")
@@ -250,6 +263,10 @@ def main():
                 )
                 if settings.get("sound_alerts", True):
                     play_sound()
+                if settings.get("phone_alerts"):
+                    phone.submit(settings, webhooks.in_stock_alert(
+                        title, slug, region, price, item.get("favourite", False)),
+                        on_result=phone_result)
                 if settings.get("auto_open_url", True):
                     webbrowser.open(product_url(slug, region))
                 stock_history.record_alert()

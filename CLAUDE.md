@@ -2,8 +2,9 @@
 
 A Windows desktop app (Python, tkinter/ttk) that watches the Ubiquiti Store (store.ui.com) and alerts when a
 product comes back in stock. It reads the store's public Next.js data: the whole catalog on every check (8
-category pages), diffed against the previous check. A tray icon, Start with Windows, notifications, history,
-an installer and a portable zip, signed in-app updates. Also a headless CLI watcher.
+category pages), diffed against the previous check. A tray icon, Start with Windows, notifications, alerts on
+your phone (webhooks), history, an installer and a portable zip, signed in-app updates. Also a headless CLI
+watcher.
 
 The repo is public on GitHub (`jamesccupps/UnifiStockWatcher`), with a page on GitHub Pages and (planned) a
 SourceForge mirror and a winget package. Keep personal paths, the user's own watch list and machine settings out
@@ -48,6 +49,8 @@ to an empty folder is the safe way to run a build.
   registry, Start with Windows, the single-instance mutex.
 - `updater.py`: manifest verification, check, download, install (installer or portable swap). `ed25519.py`:
   verification only. `update_key.py`: the public key.
+- `webhooks.py`: alerts on your phone. `problem()` (what a service's settings lack), `build_request()` (each
+  service's format), `send()` (retries), `Sender` (one thread, in order). The GUI and the CLI both use it.
 - `installer/UnifiStockWatcher.iss`, `UnifiStockWatcher.spec`, `scripts/`: building and releasing.
 - `site/index.html` (+ `site/images/`): the project page. `release-notes/vX.Y.Z.md`: each release's text.
 - Data (never in the repo): `%APPDATA%\UniFi Stock Watcher\` or beside a portable exe: `watched_items.json`,
@@ -94,6 +97,17 @@ to an empty folder is the safe way to run a build.
   runs that balloon's callback. Installed copies set the AppUserModelID `JamesCupps.UnifiStockWatcher`, which the
   installer also puts on the Start menu shortcut. The CLI keeps the PowerShell NotifyIcon, with title and text
   passed through the environment, never interpolated into the script.
+- **Phone alerts never log or show an address.** Discord and Slack webhook URLs and ntfy topics *are* the
+  secret, and the log goes into bug reports. Messages name `webhooks.label()` (service or host). requests'
+  exception text quotes the full URL, so `_attempt` maps exceptions to its own wording; `_refusal` cuts the
+  path out of a service's reply; `load_settings` names an invalid phone setting without its value.
+- **ntfy gets JSON at the server's root** with `topic` in the body (JSON posted to the topic's address arrives
+  as the message text). Redirects aren't followed (requests would turn the POST into a GET). Each service keeps
+  its own keys in settings (`ntfy_url`, `discord_url`, …) so switching services loses nothing. The Settings
+  entries save 700 ms after typing stops, on timers owned by the app (a rebuilt tab would orphan its own), and
+  the test button saves first. `scripts/demo.py` replaces `http_post`: its stock flips would otherwise reach a
+  real phone. Checked against the real ntfy.sh (title, click, actions, priority, tags all parsed); Pushover,
+  Discord and Slack against their documented APIs only.
 - **Start with Windows** writes `HKCU\...\Run\UniFi Stock Watcher` only when it has to change (Defender flags
   programs that keep rewriting Run keys), and points it at the running copy if it moved. Uninstall removes it.
 - **Single instance**: the named mutex `JamesCupps.UnifiStockWatcher`; a second copy finds the tray window
@@ -109,7 +123,7 @@ to an empty folder is the safe way to run a build.
 ## Testing
 
 - `tests/conftest.py` points `USW_DATA_DIR` at a temp folder before anything imports `unifi_core`, and blocks the
-  network: a test that reaches for the real store fails. `isolated_files` redirects each data file per test.
+  network (`get_session` and `webhooks.http_post`): a test that reaches for the real store or a webhook fails. `isolated_files` redirects each data file per test.
 - GUI tests share one Tk root (a second Tcl interpreter breaks Tcl's library paths intermittently); the `app`
   fixture resets state and calls `_rebuild_ui()`. It stubs `check_slug`, whose retries otherwise sleep 3 s
   against the blocked network and stall the next test's setup.

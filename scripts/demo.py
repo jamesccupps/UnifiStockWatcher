@@ -6,7 +6,8 @@
 Nothing here touches the real store or your own files: the data folder is a
 fresh temporary one, the store is a stub session serving a sample catalog
 (real product names, made-up stock, prices and dates), and stock flips between
-checks so the changes feed has something to show. --shots captures windows
+checks so the changes feed has something to show. Phone alerts are printed,
+never sent. --shots captures windows
 with PrintWindow, which works while they are covered (Windows only).
 """
 
@@ -15,12 +16,25 @@ import sys
 import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 os.environ["USW_DATA_DIR"] = tempfile.mkdtemp(prefix="usw-demo-")
 
 import unifi_core  # noqa: E402
+import webhooks  # noqa: E402
+
+
+def _pretend_post(url, body, headers):
+    """Phone alerts are pretend too: the demo's stock flips would otherwise
+    reach a real phone, as made-up restocks."""
+    print(f"demo: not sending {body.get('title') or body.get('content', '')[:60]!r} "
+          f"to {urlsplit(url).hostname}")
+    return _Resp()
+
+
+webhooks.http_post = _pretend_post
 
 NOW = datetime.now(timezone.utc)
 CATALOG = {

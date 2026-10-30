@@ -24,6 +24,8 @@ a sound and the product's page in your browser. It sits in the notification area
   of stock anywhere in the store.
 - **Alerts that reach you.** A notification you can click to open the product, a sound, and the product's page
   opened in your browser, once each time something comes back. Each one is a switch in Settings.
+- **On your phone too** (3.1). The same alert through ntfy, Pushover, Discord or Slack, or as JSON to any address
+  (Home Assistant, n8n, …).
 - **Restock estimates.** The store's own restock date and how long a product has been sold out, e.g.
   `back ~7 Nov · sold out 13 days`, on the watch list and in the catalog.
 - **Runs in the background.** Closing the window keeps watching from the notification area. *Start with Windows*
@@ -77,10 +79,44 @@ settings in its own folder (that's what the `portable.txt` beside it does), and 
   **Activity** (what the watcher did). Drag its top edge to resize it.
 - **History** lists the changes to your watched products, or to the whole store. Double-click a line to open the
   product; **Export CSV…** saves the lot.
-- **Settings** take effect as you change them: how often to check, the store, the alerts, Start with Windows,
-  the theme and accent colour, text size, and importing or exporting the watch list.
+- **Settings** take effect as you change them: how often to check, the store, the alerts (on your phone too),
+  Start with Windows, the theme and accent colour, text size, and importing or exporting the watch list.
 - The tray icon is grey when idle, blue while watching, and gets a green dot when something you watch is in
   stock. Click it to open the window; right-click for Start/Stop, Check now and Quit.
+
+## Alerts on your phone
+
+New in 3.1. **Settings → Alerts on your phone** sends every alert to your phone as well, through the service you
+choose. The app on your PC sends it when it finds the product, so the PC has to be on and watching. **Send a
+test** sends one straight away and shows what the service answered; the **Activity** view notes every alert
+sent, or why one wasn't.
+
+| Service | What to enter |
+|---|---|
+| **ntfy** (free, no account) | Install the ntfy app (links on [ntfy.sh](https://ntfy.sh/)), subscribe to a topic with a name nobody would guess (anyone who knows the name can read it), and enter its address, `https://ntfy.sh/<the-name>`. A server of your own works too, and a protected topic takes an access token. |
+| **Pushover** (paid, after a free trial) | Your user key, from [pushover.net](https://pushover.net/)'s front page once you've signed in, and the API token of an application you create there (call it UniFi Stock Watcher). |
+| **Discord** | A channel's webhook: the channel's settings → Integrations → Webhooks → New Webhook → Copy Webhook URL. The Discord app notifies you of the messages in that channel. |
+| **Slack** | An incoming webhook for a channel: create a Slack app at [api.slack.com/apps](https://api.slack.com/apps), then Incoming Webhooks. |
+| **Any address (JSON)** | Any `https://` or `http://` address: a Home Assistant webhook trigger, n8n, Zapier, IFTTT, a server of your own. |
+
+An address that isn't reachable, or a service that's busy, is tried twice more over about 25 seconds. The
+addresses and keys stay in `settings.json` in your data folder; the log only ever names the service or the host.
+
+Any address gets a POST with this JSON (`event` is `test`, and `product` is `null`, for a test):
+
+```json
+{
+  "event": "in_stock",
+  "app": "UniFi Stock Watcher",
+  "version": "3.1.0",
+  "time": "2026-10-29T14:05:12+00:00",
+  "title": "Back in stock: Dream Router 7",
+  "text": "Available on the United States store for $279.00.",
+  "url": "https://store.ui.com/us/en/products/udr7",
+  "store": "us",
+  "product": {"title": "Dream Router 7", "slug": "udr7", "price": "$279.00", "favourite": false}
+}
+```
 
 ## Where it keeps things
 
@@ -95,7 +131,7 @@ settings in its own folder (that's what the `portable.txt` beside it does), and 
 
 ## Updates and privacy
 
-The app talks to two places:
+The app talks to two places, and a third if you ask it to:
 
 - `store.ui.com`, to read the catalog: one check is 8 requests, at the interval you choose (1 minute by default,
   never faster than 15 seconds). Once a day it also reads the store's home page, to notice new product
@@ -103,6 +139,8 @@ The app talks to two places:
 - GitHub, once a day, for this project's `latest.json` (turn it off in **Settings → Updates**). Nothing is
   downloaded until you click **Install**. Installed copies then run the new installer silently and restart;
   portable copies swap their program files in place and restart, and put everything back if that fails.
+- The service you choose for [alerts on your phone](#alerts-on-your-phone), if you turn them on: each alert, with
+  the product's name, price and link, and nothing else.
 
 It sends nothing about you, your watch list or your PC anywhere. **Report a problem…** opens a GitHub issue form
 with the version filled in, which you can edit and send yourself.
@@ -114,7 +152,7 @@ with the version filled in, which you can edit and send yourself.
 ```
 UnifiStockWatcher-cli.exe            # watch (picks products the first time)
 UnifiStockWatcher-cli.exe --setup    # pick the products again
-UnifiStockWatcher-cli.exe --test     # check notifications and stock detection
+UnifiStockWatcher-cli.exe --test     # check notifications, phone alerts and stock detection
 UnifiStockWatcher-cli.exe --version  # the version, and where the files are
 ```
 
@@ -125,6 +163,7 @@ It uses the same watch list and settings as the app. Run it from Task Scheduler 
 | What you see | Fix |
 |---|---|
 | No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. |
+| Nothing on the phone | **Settings → Alerts on your phone → Send a test** shows what the service answered, e.g. *HTTP 404 (Unknown Webhook)* for a deleted Discord webhook. For ntfy, check the app is subscribed to exactly the topic in the address. The PC has to be on and watching. |
 | "Couldn't reach the store" | The store or your connection is down; the watcher keeps trying at every interval. |
 | A product shows **DELISTED** | The store doesn't list it any more (renamed or discontinued). Remove it, and add the new one from the catalog. |
 | Stock looks wrong for one product | [Open an issue](https://github.com/jamesccupps/UnifiStockWatcher/issues/new?template=bug_report.yml) with its store link. A nightly check against the real store catches most changes on Ubiquiti's side the day they ship. |

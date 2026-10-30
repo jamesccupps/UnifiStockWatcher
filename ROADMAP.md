@@ -5,8 +5,6 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **Alerts on your phone.** A webhook per alert (ntfy, Discord, Slack, Pushover, or any URL), like PingerPlot's,
-  so a restock reaches you away from the PC. The most useful thing missing.
 - **Price changes.** Note when a watched product's price changes, in the history and optionally as an alert.
 - **Per-product alerts.** Favourites only, or silence one product without removing it.
 - **An automated update test.** Build N and N+1 in CI and update one to the other for real, installer and portable
@@ -16,6 +14,7 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Later, or if asked
 
+- More than one phone service at once, and Telegram (which needs a chat id as well as a token).
 - Toast notifications with buttons (*Open in store*, *Snooze*) through WinRT. Today's notifications are the tray
   icon's balloons, which Windows shows as toasts but without buttons.
 - More stores, if Ubiquiti adds regions with the same site (only the four in `STORE_REGIONS` exist today).

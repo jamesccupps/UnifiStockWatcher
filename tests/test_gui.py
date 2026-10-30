@@ -12,12 +12,14 @@ import time
 import pytest
 
 import unifi_core
-from conftest import product
+import webhooks
+from conftest import FakeResponse, product
 
 tk = pytest.importorskip("tkinter")
 
 import unifi_watcher_gui as gui  # noqa: E402
 import updater  # noqa: E402
+from tkinter import ttk  # noqa: E402
 
 logging.getLogger("unifi_watcher").setLevel(logging.CRITICAL)
 
@@ -356,6 +358,97 @@ def test_alert_settings_are_honoured(app, monkeypatch):
     app.settings.update(notifications=True, auto_open_url=True)
     app._on_in_stock(items("s")[0])
     assert len(notes) == 1 and opened == [unifi_core.product_url("s", app.settings["region"])]
+
+
+# ── alerts on your phone ─────────────────────────────────────────────────────
+
+NTFY = {"phone_alerts": True, "phone_service": "ntfy", "ntfy_url": "https://ntfy.sh/usw-test"}
+
+
+def test_a_phone_alert_goes_out_with_the_price(app, monkeypatch):
+    sent = []
+    monkeypatch.setattr(app, "_notify", lambda *a: None)
+    monkeypatch.setattr(app.phone, "submit", lambda s, a, n, cb: sent.append((s, a, n)))
+    app.settings.update(NTFY)
+    app.status["s"] = (True, "now", "$99.00", None)
+    app._on_in_stock(items("s", fav=("s",))[0])
+    assert len(sent) == 1
+    settings, alert, attempts = sent[0]
+    assert settings["ntfy_url"] == NTFY["ntfy_url"] and attempts == webhooks.ATTEMPTS
+    assert alert.slug == "s" and alert.price == "$99.00" and alert.favourite
+    app.settings["phone_alerts"] = False
+    app._on_in_stock(items("s")[0])
+    assert len(sent) == 1
+
+
+def test_the_test_alert_reaches_the_phone_when_on(app, monkeypatch):
+    sent = []
+    monkeypatch.setattr(app, "_notify", lambda *a: None)
+    monkeypatch.setattr(app.phone, "submit", lambda s, a, n, cb: sent.append((a, n)))
+    app._test_notif()
+    assert sent == []
+    app.settings.update(NTFY)
+    app._test_notif()
+    assert len(sent) == 1 and sent[0][0].test and sent[0][1] == 1
+
+
+def test_a_phone_result_is_logged(app, monkeypatch):
+    monkeypatch.setattr(webhooks, "http_post",
+                        lambda *a: FakeResponse(404, {"message": "Unknown Webhook"}))
+    app.settings.update(phone_alerts=True, phone_service="discord",
+                        discord_url="https://discord.com/api/webhooks/1/SECRET")
+    app._send_phone(webhooks.in_stock_alert("Thing", "s"), attempts=1)
+    expect = "Couldn't send the alert for Thing to Discord: HTTP 404 (Unknown Webhook)"
+    assert pump_until(app, lambda: any(m == expect for _, m, _ in app._log_lines))
+    assert not any("SECRET" in m for _, m, _ in app._log_lines)
+
+
+def _entries(widget):
+    found = []
+    for child in widget.winfo_children():
+        if isinstance(child, ttk.Entry):
+            found.append(child)
+        found += _entries(child)
+    return found
+
+
+def test_phone_fields_are_saved_and_follow_the_service(app):
+    app._show_tab("settings")
+    st = app._settings_widget
+    url, token = _entries(st.phone_fields)
+    url.insert(0, " https://ntfy.sh/my-topic \n")
+    for save in st._phone_savers:
+        save()
+    assert unifi_core.load_settings()["ntfy_url"] == "https://ntfy.sh/my-topic"
+    st.service_box.set("Discord")
+    st._service_changed(None)
+    assert app.settings["phone_service"] == "discord"
+    assert len(_entries(st.phone_fields)) == 1
+    st.service_box.set("ntfy")
+    st._service_changed(None)
+    assert _entries(st.phone_fields)[0].get() == "https://ntfy.sh/my-topic"
+
+
+def test_typing_saves_after_a_pause(app):
+    app._show_tab("settings")
+    st = app._settings_widget
+    _entries(st.phone_fields)[0].insert(0, "https://ntfy.sh/typed")
+    assert pump_until(app, lambda: app.settings["ntfy_url"] == "https://ntfy.sh/typed", 3)
+
+
+def test_the_phone_test_button_reports_what_happened(app, monkeypatch):
+    app._show_tab("settings")
+    st = app._settings_widget
+    st._phone_test()                                   # nothing entered yet
+    assert "topic's address" in st.phone_lbl.cget("text")
+    _entries(st.phone_fields)[0].insert(0, NTFY["ntfy_url"])   # saved by the button
+    monkeypatch.setattr(webhooks, "http_post", lambda *a: FakeResponse(200))
+    st._phone_test()
+    assert pump_until(app, lambda: st.phone_lbl.cget("text").startswith("Sent to ntfy"))
+    monkeypatch.setattr(webhooks, "http_post", lambda *a: FakeResponse(
+        401, {"error": "unauthorized"}))
+    st._phone_test()
+    assert pump_until(app, lambda: "HTTP 401 (unauthorized)" in st.phone_lbl.cget("text"))
 
 
 # ── delisted items ───────────────────────────────────────────────────────────
