@@ -2,6 +2,23 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## v3.2.0
+
+### Added
+
+- Per-product alerts. *Mute alerts* on a card's menu (`muted` in the watch list, carried by export and import)
+  silences one product: still checked, still in the history, no notification, sound, page or phone alert. A
+  crossed-out bell on the card unmutes it. **Only for favourites** in Alerts does the same for every product
+  that isn't starred, and the one in Alerts on your phone for the phone only. `unifi_core.wants_alert()` decides,
+  for the app and the CLI. The tray icon turns red only for an in-stock product that alerts.
+- Price changes. `StockHistory.record` logs a watched product's price change (`price_was` beside the new
+  `price`) against the last price it recorded, so a change while the app was closed counts. No price isn't a
+  change, nor is another currency (the store was switched), nor a store-wide product's price. History shows
+  them as *Price down* / *Price up*, the CSV export has a `price_was` column, and the Activity view logs each.
+  **Tell me when a price drops** (off by default) sends a notification and a phone alert (`price_drop` in the
+  JSON, priority 3 on ntfy), subject to mute and favourites-only. `record` returns the event logged (or None)
+  instead of True/False; `record_check` still returns a bool.
+
 ## v3.1.1
 
 ### Fixed

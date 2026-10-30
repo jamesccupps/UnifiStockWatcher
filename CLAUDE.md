@@ -49,8 +49,9 @@ to an empty folder is the safe way to run a build.
   registry, Start with Windows, the single-instance mutex.
 - `updater.py`: manifest verification, check, download, install (installer or portable swap). `ed25519.py`:
   verification only. `update_key.py`: the public key.
-- `webhooks.py`: alerts on your phone. `problem()` (what a service's settings lack), `build_request()` (each
-  service's format), `send()` (retries), `Sender` (one thread, in order). The GUI and the CLI both use it.
+- `webhooks.py`: alerts on your phone. `in_stock_alert()` / `price_drop_alert()`, `problem()` (what a
+  service's settings lack), `build_request()` (each service's format), `send()` (retries), `Sender` (one thread,
+  in order). The GUI and the CLI both use it.
 - `installer/UnifiStockWatcher.iss`, `UnifiStockWatcher.spec`, `scripts/`: building and releasing.
 - `site/index.html` (+ `site/images/`): the project page. `release-notes/vX.Y.Z.md`: each release's text.
 - Data (never in the repo): `%APPDATA%\UniFi Stock Watcher\` or beside a portable exe: `watched_items.json`,
@@ -75,7 +76,10 @@ to an empty folder is the safe way to run a build.
   main loop polls (every 20 ms in `_tkinter`): a cycle that posted with `after()` per row spent seconds queueing,
   and posts after close raised. Tray callbacks run on the tray thread and also go through `_post`.
 - **Alert once**: `_maybe_alert` marks `notified` on the worker before posting, so a quick check and a cycle
-  finding the same product together alert once.
+  finding the same product together alert once. Whether it alerts at all is `wants_alert()` (muted, favourites
+  only, phone favourites only), asked in `_on_in_stock` on the main thread; a muted return still marks
+  `notified`, so unmuting an in-stock product waits for its next return. Price changes are decided inside
+  `StockHistory.record` (under its lock, so also once) and posted by `_recorded`.
 - **ttk image elements tile, they don't stretch.** A 9-slice image with a few-pixel middle made one card ~1000
   alpha-blended blits per redraw, and the Settings page took seconds per style change. `Theme._put(..., grow=)`
   draws small and widens the uniform middle with `gfx.expand9` (96-240 px). Keep any new sliced image grown.
@@ -93,6 +97,8 @@ to an empty folder is the safe way to run a build.
   change. Sizes go through `Theme.S()`; fonts are in points and scale by themselves.
 - **History** logs changes only, plus a watched product's first state (`first: true`, shown as "Added: …").
   Store-wide changes (`watched: false`) are never "first". `alerts` counts notifications, not in-stock checks.
+  A watched product's price change is an event with `price_was`, against the last price recorded (so across
+  restarts); `None` and a different currency symbol aren't changes. The changes feed leaves them out.
 - **Notifications** are the tray icon's balloons (Windows shows them as toasts under the app's name); a click
   runs that balloon's callback. Installed copies set the AppUserModelID `JamesCupps.UnifiStockWatcher`, which the
   installer also puts on the Start menu shortcut. The CLI keeps the PowerShell NotifyIcon, with title and text

@@ -25,9 +25,9 @@ from unifi_core import (
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
     refresh_category_coverage, product_url, is_portable,
-    is_available, get_price, check_slug,
+    is_available, get_price, price_amount, check_slug,
     load_watched, save_watched, stock_history,
-    notify_windows, play_sound, migrate_legacy_files, setup_logging,
+    wants_alert, notify_windows, play_sound, migrate_legacy_files, setup_logging,
 )
 import webhooks
 
@@ -184,6 +184,23 @@ def test_mode():
 
 # ── Main watcher loop ─────────────────────────────────────────────────────────
 
+def price_changed(settings, phone, phone_result, item, was, now, region):
+    """A watched product's price changed: say so, and alert if it dropped and
+    the settings ask for that."""
+    old, new = price_amount(was), price_amount(now)
+    down = old is not None and new is not None and new < old
+    # "->", not an arrow: redirected output (Task Scheduler) is in the locale's
+    # code page, which may not have one.
+    print(f"          {'PRICE DOWN' if down else 'price changed':<16}  {item['title']}: {was} -> {now}")
+    if not (down and settings.get("price_alerts") and wants_alert(settings, item)):
+        return
+    alert = webhooks.price_drop_alert(item["title"], item["slug"], region, now, was,
+                                      item.get("favourite", False))
+    notify_windows(alert.title, alert.text)
+    if settings.get("phone_alerts") and wants_alert(settings, item, phone=True):
+        phone.submit(settings, alert, on_result=phone_result)
+
+
 def main():
     settings = load_settings()
     region   = settings.get("region", "us")
@@ -252,18 +269,24 @@ def main():
                 continue
 
             price_str = f" ({price})" if price else ""
-            stock_history.record(slug, title, in_stock, price)
+            event = stock_history.record(slug, title, in_stock, price)
             label = "IN STOCK" if in_stock else "out of stock"
             print(f"          {label:<16}  {title}{price_str}")
+            if event and event.get("price_was"):
+                price_changed(settings, phone, phone_result, item, event["price_was"], price,
+                              region)
 
-            if in_stock and not notified[slug]:
+            if in_stock and not notified[slug] and not wants_alert(settings, item):
+                notified[slug] = True
+                print(f"          (no alert: {'muted' if item.get('muted') else 'favourites only'})")
+            elif in_stock and not notified[slug]:
                 notify_windows(
                     f"IN STOCK: {title}",
                     f"{title} is now available on the Unifi store!"
                 )
                 if settings.get("sound_alerts", True):
                     play_sound()
-                if settings.get("phone_alerts"):
+                if settings.get("phone_alerts") and wants_alert(settings, item, phone=True):
                     phone.submit(settings, webhooks.in_stock_alert(
                         title, slug, region, price, item.get("favourite", False)),
                         on_result=phone_result)

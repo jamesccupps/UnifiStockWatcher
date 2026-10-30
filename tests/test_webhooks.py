@@ -154,10 +154,32 @@ def test_the_json_body_describes_the_product():
     _, body, _ = webhooks.build_request(JSON, alert(favourite=True))
     assert body["event"] == "in_stock" and body["app"] == unifi_core.APP_NAME
     assert body["product"] == {"title": "Dream Router 7", "slug": "udr7",
-                               "price": "$279.00", "favourite": True}
+                               "price": "$279.00", "price_was": None, "favourite": True}
     assert body["store"] == "us" and body["url"] == unifi_core.product_url("udr7")
     _, body, _ = webhooks.build_request(JSON, webhooks.test_alert())
     assert body["event"] == "test" and body["product"] is None
+
+
+def drop(**kw):
+    return webhooks.price_drop_alert("Dream Router 7", "udr7", "uk", "£229.00", "£249.00", **kw)
+
+
+def test_a_price_drop_alert_says_from_what_to_what():
+    a = drop()
+    assert a.title == "Price drop: Dream Router 7"
+    assert a.text == "Now £229.00 on the United Kingdom store, down from £249.00."
+    assert a.url == unifi_core.product_url("udr7", "uk")
+    assert drop(favourite=True).title.startswith("★ ")
+
+
+def test_a_price_drop_is_its_own_event():
+    _, body, _ = webhooks.build_request(JSON, drop())
+    assert body["event"] == "price_drop"
+    assert body["product"]["price"] == "£229.00" and body["product"]["price_was"] == "£249.00"
+    _, body, _ = webhooks.build_request(NTFY, drop(favourite=True))
+    assert body["priority"] == 3 and body["tags"] == ["star", "chart_with_downwards_trend"]
+    _, body, _ = webhooks.build_request(NTFY, alert())
+    assert body["priority"] == 4 and body["tags"] == ["package"]
 
 
 # ── delivery ─────────────────────────────────────────────────────────────────

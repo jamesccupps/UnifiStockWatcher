@@ -360,6 +360,135 @@ def test_alert_settings_are_honoured(app, monkeypatch):
     assert len(notes) == 1 and opened == [unifi_core.product_url("s", app.settings["region"])]
 
 
+def _menu_labels(menu):
+    try:
+        return [menu.entrycget(i, "label") for i in range(menu.index("end") + 1)
+                if menu.type(i) == "command"]
+    finally:
+        menu.destroy()
+
+
+def test_a_muted_product_is_checked_but_does_not_alert(app, monkeypatch):
+    notes, sounds = [], []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    monkeypatch.setattr(gui, "play_sound", lambda: sounds.append(1))
+    before = gui.stock_history.get_stats()["alerts"]
+    app.watched = items("s")
+    app._refresh_list()
+    assert "Mute alerts" in _menu_labels(app.rows["s"]._menu())
+    app._toggle_mute(app.watched[0])
+    assert unifi_core.load_watched()[0]["muted"] is True
+    row = app.rows["s"]
+    assert any(isinstance(w, ttk.Button) and w.cget("text") == app.theme.icon("muted")
+               for w in row.winfo_children())
+    assert "Unmute alerts" in _menu_labels(row._menu())
+
+    monkeypatch.setattr(gui, "fetch_all_products",
+                        lambda *a, **k: [product("s", status="Available")])
+    app._cycle()
+    pump(app, 0.2)
+    assert notes == [] and sounds == []
+    assert gui.stock_history.get_stats()["alerts"] == before
+    assert app.rows["s"].pill.cget("text") == "IN STOCK"
+    assert gui.stock_history.get_events(slug="s")           # still in the history
+    assert any("no alert: it's muted" in m for _, m, _ in app._log_lines)
+
+    app._toggle_mute(app.watched[0])
+    assert unifi_core.load_watched()[0]["muted"] is False
+    assert any(m.endswith("alerts back on") for _, m, _ in app._log_lines)
+
+
+def test_favourites_only_alerts_for_favourites(app, monkeypatch):
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    app.watched = items("plain", "starred", fav=("starred",))
+    app.set_setting("alert_favourites_only", True)
+    captions = [w.cget("text") for w in app.list_frame.pack_slaves()
+                if isinstance(w, ttk.Label)]
+    assert captions == ["FAVOURITES  ·  1", "WATCHING  ·  1  ·  NO ALERTS"]
+    app._on_in_stock(app.watched[0])
+    assert notes == []
+    app._on_in_stock(app.watched[1])
+    assert len(notes) == 1
+
+
+def test_phone_favourites_only_keeps_the_rest_on_this_pc(app, monkeypatch):
+    notes, sent = [], []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    monkeypatch.setattr(app.phone, "submit", lambda s, a, n, cb: sent.append(a))
+    app.settings.update(NTFY, phone_favourites_only=True)
+    app._on_in_stock(items("plain")[0])
+    app._on_in_stock(items("starred", fav=("starred",))[0])
+    assert len(notes) == 2
+    assert [a.slug for a in sent] == ["starred"]
+
+
+def test_a_price_drop_is_logged_and_alerts_when_asked(app, monkeypatch):
+    notes, sent = [], []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    monkeypatch.setattr(app.phone, "submit", lambda s, a, n, cb: sent.append(a))
+    gui.stock_history.clear()
+    app.watched = items("s")
+    app._refresh_list()
+    amounts = iter([29900, 27900, 28900, 25900])
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [
+        product("s", status="SoldOut", amount=next(amounts))])
+
+    app._cycle()                                     # the first price
+    app._cycle()                                     # down, with alerts off
+    pump(app, 0.2)
+    assert any(m == "Price down: S, $299.00 → $279.00" for _, m, _ in app._log_lines)
+    assert notes == [] and sent == []
+
+    app.settings.update(NTFY, price_alerts=True)
+    app._cycle()                                     # up: logged, no alert
+    app._cycle()                                     # down: alert, here and on the phone
+    pump(app, 0.2)
+    assert any(m == "Price changed: S, $279.00 → $289.00" for _, m, _ in app._log_lines)
+    assert [n[0] for n in notes] == ["Price drop: S"]
+    assert len(sent) == 1 and sent[0].event == "price_drop" and sent[0].price_was == "$289.00"
+    assert not any(m.startswith("In stock") for _, m, _ in app._log_lines)
+
+    app._show_tab("history")
+    h = app._history_widget
+    h.refresh()
+    rows = [h.tree.item(i, "values") for i in h.tree.get_children()]
+    assert [r[2] for r in rows] == ["↓  Price down", "↑  Price up", "↓  Price down",
+                                    "Added: sold out"]
+    assert rows[0][3] == "$259.00, was $289.00"
+
+
+def test_a_muted_product_gets_no_price_alert(app, monkeypatch):
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    app.settings["price_alerts"] = True
+    item = {**items("s")[0], "muted": True}
+    app._on_price_change(item, "$299.00", "$279.00")
+    assert notes == []
+    app._on_price_change(items("s")[0], "$299.00", "$279.00")
+    assert len(notes) == 1
+
+
+def test_a_muted_product_in_stock_leaves_the_tray_calm(app):
+    states = []
+
+    class FakeTray:
+        def set_state(self, state, tip):
+            states.append(state)
+
+    app.tray = FakeTray()
+    try:
+        app.watched = items("s")
+        app.watched[0]["muted"] = True
+        app._refresh_list()
+        app._update_row("s", True, "12:00")
+        assert states[-1] == "idle" and "1 in stock" in app.title()
+        app._toggle_mute(app.watched[0])
+        assert states[-1] == "alert"
+    finally:
+        app.tray = None
+
+
 # ── alerts on your phone ─────────────────────────────────────────────────────
 
 NTFY = {"phone_alerts": True, "phone_service": "ntfy", "ntfy_url": "https://ntfy.sh/usw-test"}

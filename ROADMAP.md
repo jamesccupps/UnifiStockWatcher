@@ -5,8 +5,6 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **Price changes.** Note when a watched product's price changes, in the history and optionally as an alert.
-- **Per-product alerts.** Favourites only, or silence one product without removing it.
 - **An automated update test.** Build N and N+1 in CI and update one to the other for real, installer and portable
   (CLAUDE.md has the manual procedure).
 - **winget and SourceForge.** Submit `JamesCupps.UnifiStockWatcher` to winget-pkgs; set up the SourceForge mirror

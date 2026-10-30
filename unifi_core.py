@@ -23,7 +23,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "3.1.1"
+__version__ = "3.2.0"
 
 APP_NAME = "UniFi Stock Watcher"
 APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
@@ -230,6 +230,8 @@ DEFAULT_SETTINGS = {
     "notifications":      True,
     "sound_alerts":       True,
     "auto_open_url":      True,
+    "alert_favourites_only": False, # wants_alert(): the rest are still checked
+    "price_alerts":       False,    # when a watched product gets cheaper
     "auto_start":         False,    # start watching when the app opens
     "close_to_tray":      True,
     "check_updates":      True,
@@ -242,6 +244,7 @@ DEFAULT_SETTINGS = {
     # Alerts on your phone (webhooks.py). Each service keeps its own address
     # or keys, so trying another one doesn't lose them.
     "phone_alerts":       False,
+    "phone_favourites_only": False,
     "phone_service":      "ntfy",
     "ntfy_url":           "",
     "ntfy_token":         "",       # only for a protected topic
@@ -722,6 +725,19 @@ def _is_unpriced(price_val):
     return False
 
 
+def price_amount(text):
+    """A price as _format_price writes it, as a number ("C$1,299.00" -> 1299.0),
+    or None."""
+    try:
+        return float(re.sub(r"[^\d.]", "", text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _same_currency(a, b):
+    return re.sub(r"[\d.,\s]", "", a) == re.sub(r"[\d.,\s]", "", b)
+
+
 def get_price(product):
     """Extract the display price from a product dict, or None if unpriced.
 
@@ -959,6 +975,7 @@ def _normalise_watched(data):
             continue
         item.setdefault("title", item["slug"])
         item.setdefault("favourite", False)
+        item.setdefault("muted", False)
         item.setdefault("price", None)
         item.setdefault("added_at", None)
         items.append(item)
@@ -992,7 +1009,8 @@ def _valid_event(e):
 class StockHistory:
     """Stock changes, persisted to JSON for the History tab and stats.
 
-    An event is a change: a product coming into or going out of stock, or a
+    An event is a change: a product coming into or going out of stock, a
+    watched product's price changing (`price_was` holds the old one), or a
     watched item's first state. 2.x appended one event per watched item per
     check, so 50 items polled every minute filled the 2000-event file with
     identical "out of stock" lines in 40 minutes and pushed every real change
@@ -1013,8 +1031,11 @@ class StockHistory:
         with self._lock:
             self._data = self._load()
             self._last = {}             # slug -> last recorded in_stock
+            self._price = {}            # slug -> last recorded price
             for e in self._data["events"]:
                 self._last[e["slug"]] = e["in_stock"]
+                if isinstance(e.get("price"), str) and e["price"]:
+                    self._price[e["slug"]] = e["price"]
             self._dirty = False
             self._unsaved = 0
 
@@ -1064,19 +1085,27 @@ class StockHistory:
 
     def record(self, slug, title, in_stock, price=None, watched=True):
         """Record a product's state; logged only when it differs from the
-        last state recorded for that product. Returns True if logged."""
+        last state recorded for that product: its stock, or a watched
+        product's price. Returns the event logged, or None."""
         with self._lock:
             if watched:
                 self._data["stats"]["total_checks"] += 1
-            if self._last.get(slug) == in_stock:
+            was = self._price.get(slug)
+            if price:
+                self._price[slug] = price
+            # Against the last price recorded, so a change while the app was
+            # closed is noticed too. No price ("coming soon") isn't a change,
+            # and nor is another currency (the store was switched).
+            repriced = bool(watched and price and was and price != was
+                            and _same_currency(price, was))
+            if self._last.get(slug) == in_stock and not repriced:
                 if watched:
                     self._touch_locked()
-                return False
+                return None
             # Only a watched product's first state is a sighting; any other
             # product is recorded only when it changes.
             first = watched and slug not in self._last
-            self._last[slug] = in_stock
-            self._data["events"].append({
+            event = {
                 "ts":       datetime.now().isoformat(timespec="seconds"),
                 "slug":     slug,
                 "title":    title,
@@ -1084,13 +1113,17 @@ class StockHistory:
                 "price":    price,
                 "watched":  bool(watched),
                 "first":    first,      # a first sighting, not a change
-            })
+            }
+            if self._last.get(slug) == in_stock:
+                event["price_was"] = was
+            self._last[slug] = in_stock
+            self._data["events"].append(event)
             self._touch_locked()
-            return True
+            return dict(event)
 
     # 2.x name, kept for scripts that drive the core directly.
     def record_check(self, slug, title, in_stock, price=None):
-        return self.record(slug, title, in_stock, price, watched=True)
+        return self.record(slug, title, in_stock, price, watched=True) is not None
 
     def record_alert(self):
         with self._lock:
@@ -1121,6 +1154,7 @@ class StockHistory:
         with self._lock:
             self._data = _empty_history()
             self._last = {}
+            self._price = {}
             self._save_locked()
 
 
@@ -1131,6 +1165,19 @@ atexit.register(stock_history.flush)
 
 
 # ── Notification ─────────────────────────────────────────────────────────────
+
+def wants_alert(settings, item, phone=False):
+    """Whether a watched product coming back in stock alerts: never when it's
+    muted, and only favourites when the settings say so, for every alert or
+    (phone=True) for the phone. A product that doesn't is still checked and
+    recorded in the history."""
+    if item.get("muted"):
+        return False
+    if item.get("favourite"):
+        return True
+    return not (settings.get("alert_favourites_only")
+                or (phone and settings.get("phone_favourites_only")))
+
 
 def notify_windows(title, message):
     """Show a system tray balloon notification (Windows).
@@ -1214,6 +1261,7 @@ def import_watchlist(filepath):
             "slug":      item["slug"],
             "title":     str(item["title"])[:200],
             "favourite": bool(item["favourite"]),
+            "muted":     bool(item["muted"]),
             "price":     item["price"][:40] if isinstance(item["price"], str) else None,
             "added_at":  added_at[:40] if isinstance(added_at, str) and added_at
                          else datetime.now().isoformat(),

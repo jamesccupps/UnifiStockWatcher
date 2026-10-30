@@ -26,6 +26,10 @@ a sound and the product's page in your browser. It sits in the notification area
   opened in your browser, once each time something comes back. Each one is a switch in Settings.
 - **On your phone too** (3.1). The same alert through ntfy, Pushover, Discord or Slack, or as JSON to any address
   (Home Assistant, n8n, …).
+- **Only the alerts you want** (3.2). Mute one product without removing it, or alert only for favourites, here or
+  just on the phone.
+- **Price changes** (3.2). Every price change of a product you watch goes into the history, and a price drop can
+  alert you too.
 - **Restock estimates.** The store's own restock date and how long a product has been sold out, e.g.
   `back ~7 Nov · sold out 13 days`, on the watch list and in the catalog.
 - **Runs in the background.** Closing the window keeps watching from the notification area. *Start with Windows*
@@ -72,8 +76,15 @@ settings in its own folder (that's what the `portable.txt` beside it does), and 
 3. When a product you watch comes back, you get the alert, its card turns green and gets an **Open in store**
    button.
 
-- **★** pins a product to the Favourites at the top. **⋯** on a card (or a right-click) has *Check now*, *Copy link*
-  and *Remove*. Double-click a card to open its page.
+- **★** pins a product to the Favourites at the top. **⋯** on a card (or a right-click) has *Check now*, *Copy link*,
+  *Mute alerts* and *Remove*. Double-click a card to open its page.
+- A muted product (a crossed-out bell on its card; click the bell to unmute) is still checked and kept in the
+  history, but doesn't alert. **Settings → Alerts → Only for favourites** does the same for every product that isn't
+  starred, and **Settings → Alerts on your phone → Only for favourites** keeps the others off the phone and on the
+  PC.
+- **Settings → Alerts → Tell me when a price drops** alerts you (a notification, and your phone if that's on) when a
+  product you watch gets cheaper. The history keeps every price change either way, even one that happened while
+  the app was closed.
 - **Check now** (F5) checks straight away, watching or not. Ctrl+N opens the catalog; Ctrl+1/2/3 switch tabs.
 - The bottom panel has two views: **Store changes** (everything that changed anywhere in the store) and
   **Activity** (what the watcher did). Drag its top edge to resize it.
@@ -102,19 +113,21 @@ sent, or why one wasn't.
 An address that isn't reachable, or a service that's busy, is tried twice more over about 25 seconds. The
 addresses and keys stay in `settings.json` in your data folder; the log only ever names the service or the host.
 
-Any address gets a POST with this JSON (`event` is `test`, and `product` is `null`, for a test):
+Any address gets a POST with this JSON. `event` is `in_stock`, `price_drop` (with the old price in
+`product.price_was`; null otherwise), or `test`, when `product` is `null`:
 
 ```json
 {
   "event": "in_stock",
   "app": "UniFi Stock Watcher",
-  "version": "3.1.0",
+  "version": "3.2.0",
   "time": "2026-10-29T14:05:12+00:00",
   "title": "Back in stock: Dream Router 7",
   "text": "Available on the United States store for $279.00.",
   "url": "https://store.ui.com/us/en/products/udr7",
   "store": "us",
-  "product": {"title": "Dream Router 7", "slug": "udr7", "price": "$279.00", "favourite": false}
+  "product": {"title": "Dream Router 7", "slug": "udr7", "price": "$279.00", "price_was": null,
+              "favourite": false}
 }
 ```
 
@@ -140,7 +153,7 @@ The app talks to two places, and a third if you ask it to:
   downloaded until you click **Install**. Installed copies then run the new installer silently and restart;
   portable copies swap their program files in place and restart, and put everything back if that fails.
 - The service you choose for [alerts on your phone](#alerts-on-your-phone), if you turn them on: each alert, with
-  the product's name, price and link, and nothing else.
+  the product's name, price (and old price, for a price drop) and link, and nothing else.
 
 It sends nothing about you, your watch list or your PC anywhere. **Report a problem…** opens a GitHub issue form
 with the version filled in, which you can edit and send yourself.
@@ -162,7 +175,7 @@ It uses the same watch list and settings as the app. Run it from Task Scheduler 
 
 | What you see | Fix |
 |---|---|
-| No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. |
+| No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. A muted product (crossed-out bell), or one that isn't a favourite with **Only for favourites** on, never alerts; the **Activity** view says *no alert* and why. |
 | Nothing on the phone | **Settings → Alerts on your phone → Send a test** shows what the service answered, e.g. *HTTP 404 (Unknown Webhook)* for a deleted Discord webhook. For ntfy, check the app is subscribed to exactly the topic in the address. The PC has to be on and watching. |
 | "Couldn't reach the store" | The store or your connection is down; the watcher keeps trying at every interval. |
 | A product shows **DELISTED** | The store doesn't list it any more (renamed or discontinued). Remove it, and add the new one from the catalog. |

@@ -1,5 +1,5 @@
-"""Alerts on your phone: an in-stock alert sent to ntfy, Pushover, Discord or
-Slack, or as JSON to any address (Home Assistant, n8n, ...).
+"""Alerts on your phone: an in-stock (or price drop) alert sent to ntfy,
+Pushover, Discord or Slack, or as JSON to any address (Home Assistant, n8n, ...).
 
 Each service gets the message in its own format, so it reads well in that
 service's app. Delivery runs off the caller's thread (`Sender`), retries the
@@ -56,6 +56,8 @@ class Alert:
     store: str = "us"
     favourite: bool = False
     test: bool = False
+    event: str = "in_stock"         # or "price_drop"
+    price_was: str | None = None
 
 
 def in_stock_alert(title, slug, region="us", price=None, favourite=False):
@@ -64,6 +66,14 @@ def in_stock_alert(title, slug, region="us", price=None, favourite=False):
     return Alert(title=f"{'★ ' if favourite else ''}Back in stock: {title}", text=text,
                  url=product_url(slug, region), product=title, slug=slug, price=price,
                  store=region, favourite=favourite)
+
+
+def price_drop_alert(title, slug, region, price, was, favourite=False):
+    store = STORE_REGIONS.get(region, STORE_REGIONS["us"])["label"]
+    return Alert(title=f"{'★ ' if favourite else ''}Price drop: {title}",
+                 text=f"Now {price} on the {store} store, down from {was}.",
+                 url=product_url(slug, region), product=title, slug=slug, price=price,
+                 store=region, favourite=favourite, event="price_drop", price_was=was)
 
 
 def test_alert(region="us"):
@@ -154,9 +164,11 @@ def build_request(settings, alert):
         p = urlsplit(settings["ntfy_url"])
         base, _, topic = p.path.rstrip("/").rpartition("/")
         url = urlunsplit((p.scheme, p.netloc, base + "/", p.query, ""))
+        drop = alert.event == "price_drop"
+        tags = ["chart_with_downwards_trend"] if drop else ["package"]
         body = {"topic": topic, "title": alert.title, "message": alert.text,
-                "click": alert.url, "priority": 4,
-                "tags": ["star", "package"] if alert.favourite else ["package"],
+                "click": alert.url, "priority": 3 if drop else 4,
+                "tags": ["star", *tags] if alert.favourite else tags,
                 "actions": [{"action": "view", "label": "Open in the store", "url": alert.url}]}
         if settings.get("ntfy_token"):
             headers["Authorization"] = f"Bearer {settings['ntfy_token']}"
@@ -176,14 +188,14 @@ def build_request(settings, alert):
                         f"<{alert.url}|Open in the store>"}
     else:
         url = settings["webhook_url"]
-        body = {"event": "test" if alert.test else "in_stock",
+        body = {"event": "test" if alert.test else alert.event,
                 "app": APP_NAME, "version": __version__,
                 "time": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "title": alert.title, "text": alert.text, "url": alert.url,
                 "store": alert.store,
                 "product": None if alert.test else {
                     "title": alert.product, "slug": alert.slug, "price": alert.price,
-                    "favourite": alert.favourite}}
+                    "price_was": alert.price_was, "favourite": alert.favourite}}
     return url, body, headers
 
 

@@ -177,8 +177,23 @@ def test_normalise_drops_malformed_entries():
 
 def test_normalise_fills_optional_fields():
     (item,) = unifi_core._normalise_watched([{"slug": "s"}])
-    assert item == {"slug": "s", "title": "s", "favourite": False,
+    assert item == {"slug": "s", "title": "s", "favourite": False, "muted": False,
                     "price": None, "added_at": None}
+
+
+@pytest.mark.parametrize("item, settings, alert, phone", [
+    ({}, {}, True, True),
+    ({"muted": True}, {}, False, False),
+    ({"muted": True, "favourite": True}, {}, False, False),
+    ({}, {"alert_favourites_only": True}, False, False),
+    ({"favourite": True}, {"alert_favourites_only": True}, True, True),
+    ({}, {"phone_favourites_only": True}, True, False),
+    ({"favourite": True}, {"phone_favourites_only": True}, True, True),
+])
+def test_wants_alert(item, settings, alert, phone):
+    item = {"slug": "s", **item}
+    assert unifi_core.wants_alert(settings, item) is alert
+    assert unifi_core.wants_alert(settings, item, phone=True) is phone
 
 
 def test_load_watched_tolerates_a_non_list_file(isolated_files):
@@ -240,7 +255,7 @@ def test_import_constrains_imported_fields(isolated_files, tmp_path):
     src = tmp_path / "in.json"
     unifi_core.write_json(src, [{
         "slug": "fine-slug", "title": "y" * 500,
-        "favourite": "truthy", "price": {"not": "a string"},
+        "favourite": "truthy", "muted": 1, "price": {"not": "a string"},
         "added_at": {"nor": "this"}, "extra_key": "should not survive",
     }])
     unifi_core.import_watchlist(src)
@@ -248,6 +263,7 @@ def test_import_constrains_imported_fields(isolated_files, tmp_path):
     assert item["slug"] == "fine-slug"
     assert len(item["title"]) == 200
     assert item["favourite"] is True
+    assert item["muted"] is True
     assert item["price"] is None
     assert isinstance(item["added_at"], str)
     assert "extra_key" not in item
@@ -400,6 +416,44 @@ def test_history_clear_resets_and_persists(tmp_path):
     assert unifi_core.read_json(path, {})["events"] == []
     h.record("a", "A", True)                  # a first sighting again
     assert h.get_events()[-1]["first"] is True
+
+
+def test_history_logs_a_watched_products_price_change(tmp_path):
+    h = unifi_core.StockHistory(path=tmp_path / "h.json")
+    assert h.record("a", "A", False, "$299.00")["first"] is True
+    assert h.record("a", "A", False, "$299.00") is None
+    ev = h.record("a", "A", False, "$279.00")
+    assert ev["price"] == "$279.00" and ev["price_was"] == "$299.00" and not ev["first"]
+    assert h.record("a", "A", False, None) is None          # no price isn't a change
+    assert h.record("a", "A", False, "$279.00") is None
+    ev = h.record("a", "A", True, "$289.00")                 # a stock change says only that
+    assert ev["in_stock"] is True and "price_was" not in ev
+    assert [e.get("price_was") for e in h.get_events()] == [None, "$299.00", None]
+
+
+def test_history_price_changes_survive_a_restart(tmp_path):
+    path = tmp_path / "h.json"
+    h = unifi_core.StockHistory(path=path)
+    h.record("a", "A", False, "$299.00")
+    h.flush()
+    h = unifi_core.StockHistory(path=path)
+    assert h.record("a", "A", False, "$279.00")["price_was"] == "$299.00"
+
+
+def test_history_ignores_other_currencies_and_store_wide_prices(tmp_path):
+    h = unifi_core.StockHistory(path=tmp_path / "h.json")
+    h.record("a", "A", False, "$299.00")
+    assert h.record("a", "A", False, "€279.00") is None      # switched to the EU store
+    assert h.record("a", "A", False, "€269.00")["price_was"] == "€279.00"
+    h.record("x", "X", True, "$10.00", watched=False)
+    assert h.record("x", "X", True, "$9.00", watched=False) is None
+
+
+@pytest.mark.parametrize("text, amount", [
+    ("$1,299.00", 1299.0), ("C$199.50", 199.5), ("€279.00", 279.0), ("1,050.00 SEK", 1050.0),
+    (None, None), ("", None), ("free", None)])
+def test_price_amount(text, amount):
+    assert unifi_core.price_amount(text) == amount
 
 
 def test_record_check_keeps_its_2x_name(tmp_path):

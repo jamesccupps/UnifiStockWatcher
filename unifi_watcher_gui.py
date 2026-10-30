@@ -40,10 +40,10 @@ from unifi_core import (  # noqa: E402
     load_settings, save_settings, product_url, store_home,
     get_build_id, invalidate_build_id, fetch_all_products,
     refresh_category_coverage, effective_categories,
-    is_available, get_price, check_slug,
+    is_available, get_price, price_amount, check_slug,
     describe_restock, describe_sold_out_for, is_coming_soon,
     load_watched, save_watched, stock_history,
-    notify_windows, play_sound, migrate_legacy_files, setup_logging,
+    wants_alert, notify_windows, play_sound, migrate_legacy_files, setup_logging,
     export_watchlist, import_watchlist,
 )
 import gfx  # noqa: E402
@@ -618,7 +618,8 @@ def _price_value(p):
 
 class WatchedRow(ttk.Frame):
     """One watched product, as a card: favourite star, name and status line,
-    price, a status pill, and (when it's in stock) a button to the store."""
+    a bell if its alerts are muted, price, a status pill, and (when it's in
+    stock) a button to the store."""
 
     def __init__(self, parent, app, item):
         T = app.theme
@@ -641,16 +642,21 @@ class WatchedRow(ttk.Frame):
         self.title_lbl.grid(row=0, column=1, sticky="sw")
         self.sub = ttk.Label(self, text="Not checked yet", style="Card.Faint.TLabel")
         self.sub.grid(row=1, column=1, sticky="nw")
+        if item.get("muted"):
+            bell = ttk.Button(self, text=T.icon("muted"), style="Card.Icon.Subtle.TButton",
+                              command=lambda: app._toggle_mute(self.item), takefocus=False)
+            bell.grid(row=0, column=2, rowspan=2, padx=(S(10), 0))
+            Tooltip(bell, "Alerts muted for this product. Click to unmute.", T)
         self.price_lbl = ttk.Label(self, text=item.get("price") or "", style="Card.Muted.TLabel",
                                    width=10, anchor="e")
-        self.price_lbl.grid(row=0, column=2, rowspan=2, padx=(S(10), S(12)))
+        self.price_lbl.grid(row=0, column=3, rowspan=2, padx=(S(10), S(12)))
         self.pill = ttk.Label(self, text="NOT CHECKED", style="Neutral.Pill.TLabel")
-        self.pill.grid(row=0, column=3, rowspan=2, padx=(0, S(8)))
+        self.pill.grid(row=0, column=4, rowspan=2, padx=(0, S(8)))
         self.open_btn = ttk.Button(self, text="Open in store", style="Card.Accent.TButton",
                                    command=self._open, takefocus=False)
         self.more = ttk.Button(self, text=T.icon("more"), style="Card.Icon.Subtle.TButton",
                                command=self._menu_at_button, takefocus=False)
-        self.more.grid(row=0, column=5, rowspan=2)
+        self.more.grid(row=0, column=6, rowspan=2)
         Tooltip(self.more, "More", T)
         for w in (self, self.title_lbl, self.sub, self.price_lbl, self.pill):
             w.bind("<Button-3>", self._context)
@@ -670,6 +676,8 @@ class WatchedRow(ttk.Frame):
         m.add_separator()
         m.add_command(label="Remove from favourites" if item.get("favourite") else "Add to favourites",
                       command=lambda: app._toggle_fav(item))
+        m.add_command(label="Unmute alerts" if item.get("muted") else "Mute alerts",
+                      command=lambda: app._toggle_mute(item))
         m.add_command(label="Remove from watch list", command=lambda: app._remove_item(item))
         return m
 
@@ -701,7 +709,7 @@ class WatchedRow(ttk.Frame):
             self.pill.config(text="SOLD OUT", style="Red.Pill.TLabel")
         self.configure(style="Hot.Tile.TFrame" if in_stock else "Tile.TFrame")
         if in_stock:
-            self.open_btn.grid(row=0, column=4, rowspan=2, padx=(0, self.T.S(6)))
+            self.open_btn.grid(row=0, column=5, rowspan=2, padx=(0, self.T.S(6)))
         else:
             self.open_btn.grid_remove()
         if price:
@@ -759,7 +767,7 @@ class HistoryTab(ttk.Frame):
         inner = ttk.Frame(card, style="Card.TFrame", padding=S(4))
         inner.pack(fill="both", expand=True, padx=S(2), pady=S(2))
         cols = (("time", "When", 150), ("product", "Product", 330),
-                ("change", "Change", 150), ("price", "Price", 100))
+                ("change", "Change", 150), ("price", "Price", 150))
         self.tree = ttk.Treeview(inner, columns=[c[0] for c in cols], show="headings",
                                  selectmode="browse")
         for key, label, width in cols:
@@ -768,6 +776,7 @@ class HistoryTab(ttk.Frame):
                              stretch=key == "product")
         self.tree.tag_configure("in", foreground=T.c["green"])
         self.tree.tag_configure("first", foreground=T.c["text2"])
+        self.tree.tag_configure("price", foreground=T.c["amber"])
         sb = ttk.Scrollbar(inner, orient="vertical", command=self.tree.yview,
                            style="Card.Vertical.TScrollbar")
         self.tree.configure(yscrollcommand=sb.set)
@@ -794,14 +803,21 @@ class HistoryTab(ttk.Frame):
         events = self._events()
         for i, ev in enumerate(events[:2000]):
             ts = friendly_time(ev.get("ts", ""))
-            if ev.get("first"):
+            price = ev.get("price") or ""
+            if ev.get("price_was"):
+                old, new = price_amount(ev["price_was"]), price_amount(price)
+                down = old is not None and new is not None and new < old
+                change = "↓  Price down" if down else "↑  Price up"
+                price = f"{price}, was {ev['price_was']}"
+                tag = "price"
+            elif ev.get("first"):
                 change = "Added: in stock" if ev.get("in_stock") else "Added: sold out"
                 tag = "first"
             else:
                 change = "▲  In stock" if ev.get("in_stock") else "▼  Sold out"
                 tag = "in" if ev.get("in_stock") else "out"
             self.tree.insert("", "end", iid=f"e{i}", values=(
-                ts, ev.get("title", ev.get("slug")), change, ev.get("price") or ""),
+                ts, ev.get("title", ev.get("slug")), change, price),
                 tags=(tag, ev.get("slug", "")))
         if events:
             self.empty.place_forget()
@@ -823,10 +839,11 @@ class HistoryTab(ttk.Frame):
             return
         with open(path, "w", newline="", encoding="utf-8") as fh:
             w = csv.writer(fh)
-            w.writerow(["time", "product", "slug", "in_stock", "price", "watched"])
+            w.writerow(["time", "product", "slug", "in_stock", "price", "watched", "price_was"])
             for e in reversed(self._events()):
                 w.writerow([e.get("ts"), e.get("title"), e.get("slug"),
-                            e.get("in_stock"), e.get("price") or "", e.get("watched", True)])
+                            e.get("in_stock"), e.get("price") or "", e.get("watched", True),
+                            e.get("price_was") or ""])
         self.app._log(f"History exported to {path}", "ok")
 
     def _clear(self):
@@ -936,6 +953,14 @@ class SettingsTab(ttk.Frame):
         self._switch(r, "sound_alerts")
         r = self._row(sec, "Open the product's page", "In your browser, the moment it's back.")
         self._switch(r, "auto_open_url")
+        r = self._row(sec, "Tell me when a price drops",
+                      "A notification, and your phone if that's on, when a product you watch "
+                      "gets cheaper. The history keeps every price change either way.")
+        self._switch(r, "price_alerts")
+        r = self._row(sec, "Only for favourites",
+                      "Only starred products alert; the others are still checked and kept in "
+                      "the history. To silence one product, right-click it and choose Mute alerts.")
+        self._switch(r, "alert_favourites_only")
         r = self._row(sec, "Try it", "Shows what an alert looks like, and sends one to your "
                                      "phone too if that's on.")
         ttk.Button(r, text="Send a test alert", command=app._test_notif).pack(side="right")
@@ -1023,6 +1048,8 @@ class SettingsTab(ttk.Frame):
                       "your own (Home Assistant, n8n, …). This PC sends them, so it has to be "
                       "on and watching.")
         self._switch(r, "phone_alerts", on_change=self._phone_toggled)
+        r = self._row(sec, "Only for favourites", "The others alert on this PC only.")
+        self._switch(r, "phone_favourites_only")
         r = self._row(sec, "Service")
         self._services = {name: k for k, name in webhooks.SERVICES.items()}
         self.service_box = ttk.Combobox(r, state="readonly", values=list(self._services),
@@ -1612,6 +1639,8 @@ class UnifiWatcherApp(tk.Tk):
             self._retheme()
         else:
             self._update_store_label()
+            if old.get("alert_favourites_only") != self.settings.get("alert_favourites_only"):
+                self._refresh_list()         # the "no alerts" caption, the tray
 
     def _retheme(self):
         self.theme.apply(self.settings)
@@ -1669,7 +1698,10 @@ class UnifiWatcherApp(tk.Tk):
                                   ("Watching", others, S(14) if favourites else 0)):
             if not items:
                 continue
-            ttk.Label(self.list_frame, text=f"{title.upper()}  ·  {len(items)}",
+            caption = f"{title.upper()}  ·  {len(items)}"
+            if items is others and self.settings.get("alert_favourites_only"):
+                caption += "  ·  NO ALERTS"
+            ttk.Label(self.list_frame, text=caption,
                       style="Caps.TLabel").pack(fill="x", pady=(top, S(6)))
             for item in items:
                 row = WatchedRow(self.list_frame, self, item)
@@ -1693,8 +1725,12 @@ class UnifiWatcherApp(tk.Tk):
     def _update_tray(self):
         if not getattr(self, "tray", None):
             return
-        n_in = sum(1 for slug, s in self.status.items() if s[0] and slug in self.rows)
-        state = "alert" if n_in else ("watching" if self.watching else "idle")
+        in_stock = [slug for slug, s in self.status.items() if s[0] and slug in self.rows]
+        n_in = len(in_stock)
+        # Red only for products that alert: a muted one that stays in stock
+        # would otherwise keep it red for good.
+        hot = any(wants_alert(self.settings, self.rows[slug].item) for slug in in_stock)
+        state = "alert" if hot else ("watching" if self.watching else "idle")
         n = len(self.watched)
         tip = (f"{APP_NAME}: watching {n} product{'s' if n != 1 else ''}" if self.watching
                else f"{APP_NAME}: not watching")
@@ -1723,6 +1759,18 @@ class UnifiWatcherApp(tk.Tk):
         self._log(f"{item['title']} {'added to' if is_fav else 'removed from'} favourites",
                   "fav" if is_fav else "info")
 
+    def _toggle_mute(self, item):
+        """Mute or unmute one product's alerts. It's still checked and kept in
+        the history; unmuting one that's in stock waits for its next return."""
+        muted = False
+        for w in self.watched:
+            if w["slug"] == item["slug"]:
+                w["muted"] = muted = not w.get("muted", False)
+                break
+        save_watched(self.watched)
+        self._refresh_list()
+        self._log(f"{item['title']}: alerts {'muted' if muted else 'back on'}", "info")
+
     def _quick_check_item(self, item):
         self._log(f"Checking {item['title']}…", "info")
 
@@ -1733,7 +1781,8 @@ class UnifiWatcherApp(tk.Tk):
                 in_stock, price = check_slug(build_id, item["slug"], region)
                 note = None
                 checked  = datetime.now().strftime("%H:%M")
-                stock_history.record(item["slug"], item["title"], in_stock, price)
+                self._recorded(item, stock_history.record(
+                    item["slug"], item["title"], in_stock, price))
                 self._post(self._update_row, item["slug"], in_stock, checked, price, note)
                 prev = self._prev_status.get(item["slug"])
                 if prev is not None and prev[0] != in_stock:
@@ -1892,7 +1941,7 @@ class UnifiWatcherApp(tk.Tk):
                     except StoreError as e:
                         self._post(self._log, f"Couldn't check {title}: {e}", "err")
                         continue
-                stock_history.record(slug, title, in_stock, price)
+                self._recorded(item, stock_history.record(slug, title, in_stock, price))
                 self._post(self._update_row, slug, in_stock, checked, price, note)
                 self._maybe_alert(item, in_stock)
             stock_history.flush()
@@ -1909,6 +1958,28 @@ class UnifiWatcherApp(tk.Tk):
             self._post(self._on_in_stock, item)
         elif not in_stock:
             self.notified[slug] = False
+
+    def _recorded(self, item, event):
+        """On a worker: what the history logged for a watched product. The
+        history decides what's a price change, under its lock, so a quick
+        check and a cycle seeing the same one report it once."""
+        if event and event.get("price_was"):
+            self._post(self._on_price_change, item, event["price_was"], event["price"])
+
+    def _on_price_change(self, item, was, now):
+        old, new = price_amount(was), price_amount(now)
+        down = old is not None and new is not None and new < old
+        self._log(f"Price {'down' if down else 'changed'}: {item['title']}, {was} → {now}",
+                  "ok" if down else "info")
+        if not (down and self.settings.get("price_alerts") and wants_alert(self.settings, item)):
+            return
+        region = self.settings.get("region", "us")
+        alert = webhooks.price_drop_alert(item["title"], item["slug"], region, now, was,
+                                          item.get("favourite", False))
+        if self.settings.get("notifications", True):
+            self._notify(alert.title, alert.text + " Click to open it.", alert.url)
+        if self.settings.get("phone_alerts") and wants_alert(self.settings, item, phone=True):
+            self._send_phone(alert)
 
     def _wait_for_next_cycle(self, interval):
         """Count down to the next poll, waking immediately on stop or F5.
@@ -1962,6 +2033,10 @@ class UnifiWatcherApp(tk.Tk):
         is_fav = item.get("favourite", False)
         region = self.settings.get("region", "us")
         url = product_url(item["slug"], region)
+        if not wants_alert(self.settings, item):
+            why = "it's muted" if item.get("muted") else "only favourites alert"
+            self._log(f"In stock: {item['title']} (no alert: {why})", "ok")
+            return
         self._log(f"{'★ ' if is_fav else ''}In stock: {item['title']}", "ok")
         stock_history.record_alert()
         if self.settings.get("notifications", True):
@@ -1970,7 +2045,7 @@ class UnifiWatcherApp(tk.Tk):
                          "store. Click to open it.", url)
         if self.settings.get("sound_alerts", True):
             play_sound()
-        if self.settings.get("phone_alerts"):
+        if self.settings.get("phone_alerts") and wants_alert(self.settings, item, phone=True):
             price = self.status.get(item["slug"], (None, None, None))[2]
             self._send_phone(webhooks.in_stock_alert(item["title"], item["slug"], region,
                                                      price, is_fav))
@@ -1985,7 +2060,8 @@ class UnifiWatcherApp(tk.Tk):
                                                            where, reason, done))
 
     def _phone_sent(self, alert, where, reason, done=None):
-        what = "the test alert" if alert.test else f"the alert for {alert.product}"
+        what = "the test alert" if alert.test else \
+            f"the {'price ' if alert.event == 'price_drop' else ''}alert for {alert.product}"
         if reason:
             self._log(f"Couldn't send {what} to {where}: {reason}", "err")
         else:
@@ -2005,7 +2081,8 @@ class UnifiWatcherApp(tk.Tk):
 
     def _load_recent_changes(self):
         """The changes feed starts with the latest ones from the history."""
-        for ev in [e for e in stock_history.get_events(limit=200) if not e.get("first")][-50:]:
+        for ev in [e for e in stock_history.get_events(limit=200)
+                   if not (e.get("first") or e.get("price_was"))][-50:]:
             ts = str(ev.get("ts", ""))
             self._changes.append((ts[11:16] if len(ts) >= 16 else ts, ev.get("title", ""),
                                   bool(ev.get("in_stock")), ev.get("price")))
