@@ -4,11 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>UniFi Stock Watcher: know the moment it's back in stock on the Ubiquiti Store</title>
-<meta name="description" content="UniFi Stock Watcher is a free, open source Windows app that watches the Ubiquiti Store and alerts you the moment a product you want is back in stock: a notification, a sound and the product's page. Restock estimates, history, signed updates.">
+<meta name="description" content="UniFi Stock Watcher is a free, open source Windows app that watches the Ubiquiti Store and alerts you the moment a product you want is back in stock: a notification, a sound, the product's page, and on your phone through ntfy, Pushover, Discord or Slack. Restock estimates, history, signed updates.">
 <link rel="canonical" href="https://jamesccupps.github.io/UnifiStockWatcher/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="UniFi Stock Watcher: know the moment it's back in stock">
-<meta property="og:description" content="Free and open source. Watches the whole Ubiquiti Store and alerts you when a product you want comes back: a notification, a sound and its page.">
+<meta property="og:description" content="Free and open source. Watches the whole Ubiquiti Store and alerts you when a product you want comes back: a notification, a sound, its page, and on your phone.">
 <meta property="og:url" content="https://jamesccupps.github.io/UnifiStockWatcher/">
 <meta property="og:image" content="https://jamesccupps.github.io/UnifiStockWatcher/images/social-preview.png">
 <meta property="og:image:width" content="1280">
@@ -22,7 +22,7 @@
   "@context": "https://schema.org",
   "@type": "SoftwareApplication",
   "name": "UniFi Stock Watcher",
-  "description": "Watches the Ubiquiti Store (store.ui.com) and alerts you the moment a product you want is back in stock, with a notification, a sound and the product's page. Restock estimates, a history of changes, the notification area, Start with Windows, signed in-app updates.",
+  "description": "Watches the Ubiquiti Store (store.ui.com) and alerts you the moment a product you want is back in stock, with a notification, a sound and the product's page, and on your phone through ntfy, Pushover, Discord, Slack or a webhook. Restock estimates, a history of changes, the notification area, Start with Windows, signed in-app updates.",
   "url": "https://jamesccupps.github.io/UnifiStockWatcher/",
   "codeRepository": "https://github.com/jamesccupps/UnifiStockWatcher",
   "downloadUrl": "https://github.com/jamesccupps/UnifiStockWatcher/releases/latest",
@@ -102,7 +102,7 @@
     <div>
       <div class="brand"><img src="images/icon.png" alt=""><h1>UniFi Stock Watcher</h1></div>
       <p class="tagline">Know the moment it's back in stock on the Ubiquiti Store.</p>
-      <p class="facts">Pick the products you want from the live catalog. The app checks the whole store on a timer and tells you when one comes back: a notification you can click, a sound, and its page in your browser.</p>
+      <p class="facts">Pick the products you want from the live catalog. The app checks the whole store on a timer and tells you when one comes back: a notification you can click, a sound, its page in your browser, and an alert on your phone if you like.</p>
       <div class="actions">
         <a class="btn" id="primary" href="https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-Setup.exe">Download for Windows <small id="primary-note">UnifiStockWatcher-Setup.exe</small></a>
         <a class="btn ghost" href="https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-win64.zip">Portable zip</a>
@@ -122,14 +122,14 @@
     <h2>Restocks, without refreshing the store all day</h2>
     <div class="grid">
       <div class="card"><h3>The whole store, every check</h3><p>Each check reads the entire UniFi catalog, about 490 products in 8 requests, whether you watch one product or fifty. Every minute by default, never faster than every 15 seconds.</p></div>
-      <div class="card"><h3>Alerts that reach you</h3><p>A notification you can click to open the product, a sound, and its page opened in your browser, once each time it comes back. Each is a switch in Settings.</p></div>
+      <div class="card"><h3>Alerts that reach you</h3><p>A notification you can click to open the product, a sound, and its page opened in your browser, once each time it comes back. On your phone too, through ntfy, Pushover, Discord or Slack, or as JSON to Home Assistant and the like.</p></div>
       <div class="card"><h3>Restock estimates</h3><p>The store's own restock date and how long a product has been sold out, like <code>back ~7 Nov · sold out 13 days</code>, on your list and in the catalog.</p></div>
       <div class="card"><h3>Everything that changed</h3><p>A live feed of every product coming into or going out of stock anywhere in the store, and a history of your watched products' changes you can search and export.</p></div>
       <div class="card"><h3>Quietly in the background</h3><p>Closing the window keeps watching from the notification area, where the icon turns green when something you want is in stock. Start with Windows puts it there when you sign in.</p></div>
       <div class="card"><h3>Keeps working when the store changes</h3><p>Ubiquiti renames categories and moves products around. The app follows the store's redirects, adopts new categories by itself, and a nightly check against the real store catches anything else the day it ships.</p></div>
       <div class="card"><h3>Signed updates</h3><p>It checks GitHub once a day and installs a new version with one click, only if the download carries the release signature built into the app and matches its signed checksum.</p></div>
       <div class="card"><h3>At home on Windows 11</h3><p>Light and dark themes that follow Windows, in Windows' accent colour or one you pick, sharp at any display scale. Four stores: United States, Europe, United Kingdom and Canada.</p></div>
-      <div class="card"><h3>No account, nothing sent</h3><p>It reads the store's public catalog, the same data its web pages are built from. No login, no API key, and nothing about you or your list goes anywhere.</p></div>
+      <div class="card"><h3>No account, nothing sent</h3><p>It reads the store's public catalog, the same data its web pages are built from. No login, no API key, and nothing about you or your list goes anywhere. Phone alerts go only to the service you pick.</p></div>
     </div>
   </section>
 
