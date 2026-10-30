@@ -2,6 +2,15 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## v3.1.1
+
+### Fixed
+
+- A data file starting with a UTF-8 byte-order mark (Windows PowerShell's `Set-Content -Encoding utf8`, some
+  editors) was read as unreadable: settings fell back to their defaults, the watch list to empty, an import
+  failed, and the next save replaced the file. `read_json` reads `utf-8-sig`. Found by the 3.0.0 → 3.1.0
+  portable update test, whose hand-written watch list had one.
+
 ## v3.1.0
 
 ### Added

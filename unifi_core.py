@@ -23,7 +23,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 
 APP_NAME = "UniFi Stock Watcher"
 APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
@@ -294,13 +294,16 @@ def read_json(path, default):
     """Read a JSON file, returning `default` if it is missing or unreadable.
 
     Explicit UTF-8: the default is the locale codec, which on a Windows box is
-    cp1252 and silently mangles any watch list produced elsewhere.
+    cp1252 and silently mangles any watch list produced elsewhere. utf-8-sig,
+    because Windows PowerShell and some editors start a UTF-8 file with a
+    byte-order mark, which json rejects: a hand-edited settings.json or watch
+    list read as "unreadable", and the next save replaced it with defaults.
     """
     path = Path(path)
     if not path.exists():
         return default
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError) as e:
         log.warning("Could not read %s (%s); falling back to default", path.name, e)
         return default

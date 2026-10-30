@@ -29,6 +29,35 @@ def test_read_json_returns_default_for_corrupt_file(tmp_path):
     assert unifi_core.read_json(path, []) == []
 
 
+def test_read_json_accepts_a_byte_order_mark(tmp_path):
+    """Regression: Windows PowerShell's `Set-Content -Encoding utf8`, and some
+    editors, start the file with a BOM, and the file read as unreadable."""
+    path = tmp_path / "bom.json"
+    path.write_bytes(b"\xef\xbb\xbf" + json.dumps({"title": "Café"}).encode("utf-8"))
+    assert unifi_core.read_json(path, None) == {"title": "Café"}
+
+
+def test_bom_data_files_load(isolated_files):
+    """The settings and the watch list as Notepad or PowerShell save them,
+    and the watch list then saved back without the mark."""
+    bom = b"\xef\xbb\xbf"
+    (isolated_files / "settings.json").write_bytes(bom + b'{"region": "uk"}')
+    (isolated_files / "watched_items.json").write_bytes(
+        bom + b'[{"slug": "udr7", "title": "Dream Router 7"}]')
+    assert unifi_core.load_settings()["region"] == "uk"
+    watched = unifi_core.load_watched()
+    assert [w["slug"] for w in watched] == ["udr7"]
+    unifi_core.save_watched(watched)
+    assert not (isolated_files / "watched_items.json").read_bytes().startswith(bom)
+
+
+def test_a_bom_watch_list_imports(isolated_files, tmp_path):
+    shared = tmp_path / "shared.json"
+    shared.write_bytes(b"\xef\xbb\xbf" + json.dumps(
+        [{"slug": "udr7", "title": "Dream Router 7"}]).encode("utf-8"))
+    assert unifi_core.import_watchlist(shared) == 1
+
+
 def test_write_json_is_atomic(tmp_path):
     """A failed write must leave the previous contents intact."""
     path = tmp_path / "a.json"
