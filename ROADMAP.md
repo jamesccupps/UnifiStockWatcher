@@ -5,8 +5,9 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **winget and SourceForge.** Submit `JamesCupps.UnifiStockWatcher` to winget-pkgs; set up the SourceForge mirror
-  (both described in CLAUDE.md).
+- **winget and SourceForge.** `JamesCupps.UnifiStockWatcher` 3.2.0 is submitted to winget-pkgs
+  ([microsoft/winget-pkgs#470772](https://github.com/microsoft/winget-pkgs/pull/470772)), waiting for review; the
+  SourceForge mirror is still to set up (both described in CLAUDE.md).
 
 ## Later, or if asked
 

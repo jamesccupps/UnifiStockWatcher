@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 ID = "JamesCupps.UnifiStockWatcher"
 REPO = "https://github.com/jamesccupps/UnifiStockWatcher"
 APP_ID = "{5B1E0F7A-3C2D-4E8B-9A61-7D2C4F0B8E35}_is1"      # the .iss AppId
-SCHEMA = "1.10.0"
+SCHEMA = "1.12.0"
 
 
 def installer_sha(version, setup=None):

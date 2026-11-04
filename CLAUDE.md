@@ -199,7 +199,11 @@ write. Security reports: SECURITY.md (GitHub's private reporting).
   (InstallerType inno, Scope user, ProductCode the AppId + `_is1`) into `build/winget/`, from the published
   release's Setup.exe. Validate with `winget validate --manifest <folder>`, then open a PR to microsoft/winget-pkgs
   from the user's fork `jamesccupps/winget-pkgs` (as for Slate). The app updates itself, so a winget PR per release
-  only matters for new installs and `winget upgrade`.
+  only matters for new installs and `winget upgrade`. Without `gh`: sparse-clone the fork
+  (`git clone --depth 1 --filter=blob:none --sparse`, `git sparse-checkout set manifests/j/JamesCupps`), commit the
+  folder on a branch `JamesCupps.UnifiStockWatcher-X.Y.Z`, push it, and open the PR from the compare page (needs
+  the user signed in); a stale fork master is fine, the PR is only the new folder. The body follows the repo's
+  PR template; the user's CLA is on file (signed on #449740). First submission: 3.2.0, #470772.
 
 ## Pictures
 
