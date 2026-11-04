@@ -19,9 +19,15 @@ $helper = Join-Path $PSScriptRoot 'update_test_helper.py'
 $dist = Join-Path (Split-Path $PSScriptRoot) 'dist'
 $uninstallKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\{5B1E0F7A-3C2D-4E8B-9A61-7D2C4F0B8E35}_is1'
 
+# On a runner, also as an annotation: job logs need a signed-in session, annotations don't.
+function Write-Result([string]$level, [string]$message) {
+    $message
+    if ($env:GITHUB_ACTIONS) { "::${level} title=Update test::$($message -replace "`r?`n", '%0A')" }
+}
+
 $version = (& $Python -c "import sys; sys.path.insert(0, r'$(Split-Path $PSScriptRoot)'); import unifi_core; print(unifi_core.__version__)").Trim()
 if (-not $From) { $From = "$(& $Python $helper previous)".Trim() }
-if (-not $From) { "no published release older than $version has an updater; nothing to test"; exit 0 }
+if (-not $From) { Write-Result warning "no published release older than $version has an updater; nothing to test"; exit 0 }
 "updating $From to this build, ${version}: $($Kinds -join ', ')"
 
 # Not GetTempPath() on a runner: it can be an 8.3 short path, and processes report long ones.
@@ -127,9 +133,10 @@ foreach ($kind in $Kinds) {
         }
         Assert-Updated $dir $data $hash
         Show-Logs $data
-        "$kind ok: $From updated itself to $version"
+        Write-Result notice "$kind ok: $From updated itself to $version"
     } catch {
         Show-Logs $data
+        Write-Result error "$kind, $From to ${version}: $($_.Exception.Message)"
         throw
     } finally {
         Stop-Copies $dir

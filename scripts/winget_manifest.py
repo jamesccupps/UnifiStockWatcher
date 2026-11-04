@@ -82,8 +82,9 @@ LicenseUrl: {REPO}/blob/main/LICENSE
 ShortDescription: Alerts you the moment a product is back in stock on the Ubiquiti Store.
 Description: |-
   Watches the Ubiquiti Store (store.ui.com) for the products you pick and alerts you when one comes back in
-  stock, with a notification, a sound and the product's page. Checks the whole catalog on a timer, shows
-  restock estimates and a history of changes, runs in the notification area and can start with Windows.
+  stock, with a notification, a sound and the product's page, and on your phone through ntfy, Pushover,
+  Discord or Slack. Checks the whole catalog on a timer, shows restock estimates and a history of stock and
+  price changes, runs in the notification area and can start with Windows. Updates itself.
   An independent project, not made or endorsed by Ubiquiti.
 Moniker: unifi-stock-watcher
 Tags:
