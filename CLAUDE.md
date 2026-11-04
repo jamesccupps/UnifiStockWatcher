@@ -203,7 +203,9 @@ write. Security reports: SECURITY.md (GitHub's private reporting).
   (`git clone --depth 1 --filter=blob:none --sparse`, `git sparse-checkout set manifests/j/JamesCupps`), commit the
   folder on a branch `JamesCupps.UnifiStockWatcher-X.Y.Z`, push it, and open the PR from the compare page (needs
   the user signed in); a stale fork master is fine, the PR is only the new folder. The body follows the repo's
-  PR template; the user's CLA is on file (signed on #449740). First submission: 3.2.0, #470772.
+  PR template. The CLA bot asks on every PR (labels it `Needs-CLA`) even though the user has signed: the user
+answers `@microsoft-github-policy-service agree` there. Validation takes about 45 minutes, then a moderator
+approves. First submission: 3.2.0, #470772.
 
 ## Pictures
 
