@@ -25,6 +25,7 @@ python scripts/demo.py --shots site\images   # the README/site screenshots (Wind
 python scripts/build_windows.py      # dist\: folder, zip, installer (needs Inno Setup 6), latest.json (needs the key)
 pwsh scripts/test_portable.ps1       # unzip dist's zip, check it's portable, run its self-test and the CLI
 pwsh scripts/test_installer.ps1 -Version X.Y.Z   # install/self-test/uninstall dist's Setup.exe (replaces an installed copy!)
+pwsh scripts/test_update.ps1 [-Kinds portable]  # the previous release updating itself to dist's build (installed: as above!)
 python scripts/make_icons.py         # redraw assets\*.ico / icon.png (committed; builds never run this)
 ```
 
@@ -135,12 +136,19 @@ to an empty folder is the safe way to run a build.
   against the blocked network and stall the next test's setup.
 - `test_update.py` builds signed release folders with `cryptography` and runs the real download/verify/swap code.
 - `tests_live/` runs nightly in CI (`contract.yml`) and opens an issue labelled `store-contract` when it fails.
-- CI's `package` job builds the release files unsigned and runs `test_portable.ps1` and `test_installer.ps1`.
-- Not automated yet: a frozen N → N+1 update. To check one by hand after touching `updater.py` or the .iss:
-  build N+1 into a scratch release folder, run N with `USW_UPDATE_URL=<that folder>` and `USW_DATA_DIR` set to a
-  scratch folder, click Install, and expect `update.log` ending "update: done" (portable) or the new version in
-  Installed apps (installer), then the relaunched copy finding nothing to install. Delete the scratch release
-  folder afterwards: it's validly signed.
+- CI's `package` job builds the release files unsigned and runs `test_portable.ps1`, `test_installer.ps1` and
+  `test_update.ps1`; the release workflow runs all three on the exact files before publishing.
+- `test_update.ps1` is the real N → N+1 update, both kinds. N is the newest published release older than this
+  build (`update_test_helper.py previous`, through the API with `GITHUB_TOKEN`): its zip unzipped or its
+  Setup.exe installed, started, and then N's own `updater.py` (from N's tag's source, not this build's) is
+  driven as its Install button would: check a scratch release folder holding dist\'s files and a `latest.json`
+  signed with a throwaway key (patched in as N's `UPDATE_PUBLIC_KEY`), download, verify, `apply()`, and N is
+  ended. It expects `update.log` "update: done" (portable) or Installed apps at the new version (installed),
+  "Updated to X.Y.Z." in the new copy's log, one copy running, the watch list unchanged and no `.old` left. The
+  frozen N isn't what runs the updater (it has no headless Install), but its files, mutex and process are real,
+  and the new copy's swap or installer is. Locally: `py -3.13 scripts\build_windows.py --no-installer`, then
+  `powershell -File scripts\test_update.ps1 -Kinds portable -Python <py 3.13's python.exe>`, and delete the
+  local build's `dist\latest.json` (signed with the real key).
 
 ## Releasing
 
@@ -151,8 +159,8 @@ to an empty folder is the safe way to run a build.
 
 `.github/workflows/release.yml` then: checks the tag, tests, writes the `UPDATE_SIGNING_KEY` secret to a temp file,
 builds the folder, zip, Setup.exe and the signed `latest.json`, deletes the key, verifies `latest.json` against
-the key built into the app (`scripts/verify_release.py`), runs the portable and installer tests on those exact
-files, and publishes the release with `UnifiStockWatcher-Setup.exe`, `UnifiStockWatcher-win64.zip`,
+the key built into the app (`scripts/verify_release.py`), runs the portable, installer and update tests on
+those exact files, and publishes the release with `UnifiStockWatcher-Setup.exe`, `UnifiStockWatcher-win64.zip`,
 `latest.json` and `SHA256SUMS.txt`, all attached at creation (SourceForge's GitHub sync doesn't see files added
 later). Installed copies find it through `releases/latest/download/latest.json` and download from that version's
 tag.

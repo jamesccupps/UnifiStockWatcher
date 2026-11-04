@@ -88,6 +88,14 @@ jobs:
         shell: pwsh
         run: ./scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version $env:GITHUB_REF_NAME.TrimStart('v')
 
+      # These exact files, signed for the test with a throwaway key: a release that the previous
+      # one can't update to is never published.
+      - name: Update the previous release to these files
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/test_update.ps1
+
       - name: Publish the GitHub release
         shell: pwsh
         env:

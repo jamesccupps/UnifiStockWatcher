@@ -2,6 +2,14 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased
+
+### Development
+
+- `scripts/test_update.ps1`, in CI and before every release: the newest published release, portable and
+  installed, updates itself to the build with its own updater code (from its tag), against a release folder
+  signed with a throwaway key. Replaces the manual N → N+1 check.
+
 ## v3.2.0
 
 ### Added

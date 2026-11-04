@@ -1,7 +1,7 @@
 # Tests on every push to main and every pull request: the offline suite on Windows and Linux
 # across the supported Pythons, then the Windows build users get - the program folder, the zip
 # and the installer (unsigned here) - started in its self-test mode, installed, self-tested and
-# uninstalled. The build is kept as an artifact for a week.
+# uninstalled, and the previous release updated to it. The build is kept as an artifact for a week.
 name: CI
 
 on:
@@ -121,6 +121,14 @@ jobs:
         run: |
           $v = python -c "import unifi_core; print(unifi_core.__version__)"
           ./scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version $v
+
+      # The newest release older than this build, installed and portable, updating itself to it
+      # with its own updater code: what users' copies will do when this version is released.
+      - name: Update the previous release to this build
+        shell: pwsh
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ./scripts/test_update.ps1
 
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
