@@ -30,7 +30,7 @@ def test_writers_never_share_a_temp_file(tmp_path):
     (tmp_path / "x.json.tmp").mkdir()          # the old fixed name, taken
     unifi_core.write_json(path, [1])
     assert unifi_core.read_json(path, None) == [1]
-    assert [p.name for p in tmp_path.iterdir()] == ["x.json", "x.json.tmp"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["x.json", "x.json.tmp"]
 
 
 def test_a_briefly_locked_file_is_written_anyway(tmp_path, monkeypatch):
