@@ -194,12 +194,28 @@ def set_autostart(enabled):
         return False
 
 
+def _command_exe(command):
+    """The program a Run value starts: its first word, quoted or not."""
+    command = command.strip()
+    if command.startswith('"'):
+        end = command.find('"', 1)
+        return command[1:end] if end > 1 else None
+    return command.split(" ", 1)[0] or None
+
+
 def refresh_autostart():
-    """If Start with Windows is on but points at another copy's path (the
-    folder moved, an old install), point it at this one."""
+    """If Start with Windows is on but the program it starts is gone (the
+    folder moved, an old install removed), point it at this copy. Never
+    while that program still exists: any other copy starting (a portable
+    one tried once, a self-test in a temp folder) took it over, and two kept
+    copies rewrote it on every start."""
     current = autostart_value()
-    if current is not None and current != autostart_command():
-        set_autostart(True)
+    if current is None or current == autostart_command():
+        return
+    exe = _command_exe(current)
+    if exe and Path(exe).exists():
+        return
+    set_autostart(True)
 
 
 # ── Single instance ──────────────────────────────────────────────────────────

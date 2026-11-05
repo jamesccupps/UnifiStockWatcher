@@ -74,9 +74,13 @@ def test_any_accent_stays_readable(dark, accent):
 @pytest.mark.parametrize("dark", [False, True])
 def test_text_contrast(dark):
     p = theme.build_palette(dark, "")
-    for fg in ("text", "text2"):
+    # text3 too: it's every Settings description and placeholder.
+    for fg in ("text", "text2", "text3"):
         for bg in ("bg", "surface"):
             assert gfx.contrast(p[fg], p[bg]) >= 4.5, (fg, bg)
+    for bg in ("bg", "surface"):                 # the favourite star, an icon: 3:1
+        assert gfx.contrast(p["gold"], p[bg]) >= 3.0, ("gold", bg)
+    assert gfx.contrast(p["text3"], p["surface"]) < gfx.contrast(p["text2"], p["surface"])
     for fg, bg in (("green", "green_bg"), ("red", "red_bg"), ("amber", "amber_bg")):
         assert gfx.contrast(p[fg], p[bg]) >= 4.5, (fg, bg)
 
@@ -153,6 +157,35 @@ def test_autostart_follows_a_moved_copy(reg):
     reg.values[winplatform.RUN_VALUE] = '"C:\\old place\\UnifiStockWatcher.exe" --minimized'
     winplatform.refresh_autostart()
     assert reg.values[winplatform.RUN_VALUE] == winplatform.autostart_command()
+
+
+def test_autostart_stays_with_a_copy_that_still_exists(reg, tmp_path):
+    """Regression: any other copy that started (a portable one tried once, a
+    self-test in %TEMP%) took Start with Windows over."""
+    exe = tmp_path / "Installed" / "UnifiStockWatcher.exe"
+    exe.parent.mkdir()
+    exe.write_bytes(b"")
+    reg.values[winplatform.RUN_VALUE] = f'"{exe}" --minimized --watch'
+    winplatform.refresh_autostart()
+    assert reg.values[winplatform.RUN_VALUE] == f'"{exe}" --minimized --watch'
+    assert reg.writes == 0
+
+
+@pytest.mark.parametrize("command, exe", [
+    ('"C:\\Program Files\\A\\a.exe" --watch', "C:\\Program Files\\A\\a.exe"),
+    ("C:\\A\\a.exe --watch", "C:\\A\\a.exe"),
+    ('"unterminated', None),
+])
+def test_the_run_value_names_its_program(command, exe):
+    assert winplatform._command_exe(command) == exe
+
+
+def test_only_a_real_start_refreshes_autostart(monkeypatch):
+    """The window itself (self-test, demo, the tests) leaves the Run value alone."""
+    import unifi_watcher_gui as gui
+    import inspect
+    assert "refresh_autostart" not in inspect.getsource(gui.UnifiWatcherApp.__init__)
+    assert "refresh_autostart" in inspect.getsource(gui.main)
 
 
 def test_autostart_command_quotes_its_paths(monkeypatch, tmp_path):

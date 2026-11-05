@@ -8,7 +8,7 @@ import pytest
 
 import unifi_core
 from unifi_core import ProductNotFound, StoreError
-from conftest import FakeResponse, category_page, product, product_page
+from conftest import FakeResponse, category_page, product, product_page, variant
 
 
 # ── price / availability parsing ─────────────────────────────────────────────
@@ -219,6 +219,39 @@ def test_fetch_all_products_reads_a_flat_products_list(fake_session):
     assert [p["slug"] for p in unifi_core.fetch_all_products("bid", "us")] == ["flat"]
 
 
+def test_a_store_that_answers_no_category_is_an_error(fake_session):
+    """Regression: every category failing returned an empty catalog, which
+    read as "no products" and sent each watched one to its own page."""
+    fake_session.default = FakeResponse(503)
+    with pytest.raises(StoreError):
+        unifi_core.fetch_all_products("bid", "us")
+
+
+def test_odd_shapes_in_a_category_page_are_skipped(fake_session):
+    fake_session.default = FakeResponse(200, {"pageProps": {
+        "subCategories": [None, "x", {"products": None}, {"products": [7, product("ok")]}],
+        "products": None}})
+    assert [p["slug"] for p in unifi_core.fetch_all_products("bid", "us")] == ["ok"]
+
+
+@pytest.mark.parametrize("variants", [None, "x", [None, 3, "Available"], {}])
+def test_a_product_with_odd_variants_reads_as_unknown(variants):
+    """Regression: "variants": null raised in is_available and stopped the
+    whole check, every watched product with it."""
+    p = {"slug": "odd", "variants": variants}
+    assert unifi_core.is_available(p) is False
+    assert unifi_core.get_price(p) is None
+    assert unifi_core.is_coming_soon(p) is False
+    assert unifi_core.describe_restock(p) is None
+
+
+@pytest.mark.parametrize("amount", ["19900", None, True, [1]])
+def test_a_price_that_isnt_a_number_is_skipped(amount):
+    p = {"variants": [{"status": "Available", "displayPrice": {"amount": amount}},
+                      variant(amount=24900)]}
+    assert unifi_core.get_price(p) == "$249.00"
+
+
 # ── build id cache ───────────────────────────────────────────────────────────
 
 HOMEPAGE = '<script>{"buildId":"abc123"}</script>'
@@ -333,6 +366,36 @@ def test_descriptions_are_none_without_data():
     p = product("x", status="SoldOut")
     assert unifi_core.describe_restock(p, now=NOW) is None
     assert unifi_core.describe_sold_out_for(p, now=NOW) is None
+
+
+from datetime import timedelta  # noqa: E402
+
+NEW_YORK_EVENING = datetime(2026, 8, 19, 21, 0, tzinfo=timezone(timedelta(hours=-4)))
+SYDNEY_MORNING = datetime(2026, 8, 20, 7, 0, tzinfo=timezone(timedelta(hours=10)))
+
+
+@pytest.mark.parametrize("eta, now, expected", [
+    # 23:30 on the 19th in New York is already the 20th in UTC: "today" here.
+    ("2026-08-20T03:30:00Z", NEW_YORK_EVENING, "back ~today"),
+    # A bare date is that day wherever you are, in either direction.
+    ("2026-08-20", NEW_YORK_EVENING, "back ~tomorrow"),
+    ("2026-08-20", SYDNEY_MORNING, "back ~today"),
+])
+def test_restock_dates_are_local_days(eta, now, expected):
+    """Regression: days were counted in UTC, so a New York evening said
+    "back ~tomorrow" for something due that night."""
+    assert unifi_core.describe_restock(_oos(restockEtaAt=eta), now=now) == expected
+
+
+def test_sold_out_days_are_local_too():
+    p = _oos(soldOutAt="2026-08-20T00:30:00Z")      # 20:30 on the 19th in New York
+    assert unifi_core.describe_sold_out_for(p, now=NEW_YORK_EVENING) == "sold out today"
+
+
+def test_descriptions_use_the_local_clock_by_default(monkeypatch):
+    monkeypatch.setattr(unifi_core, "_local_now", lambda: NEW_YORK_EVENING)
+    p = _oos(restockEtaAt="2026-08-20T03:30:00Z")
+    assert unifi_core.describe_restock(p) == "back ~today"
 
 
 # ── category discovery ───────────────────────────────────────────────────────

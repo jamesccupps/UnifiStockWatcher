@@ -72,9 +72,18 @@ def test_non_string_input_does_not_raise(monkeypatch):
 
 def test_powershell_is_invoked_without_a_profile(monkeypatch):
     call = _dispatch(monkeypatch, "T", "M")
-    assert call.argv[0] == "powershell"
+    assert call.argv[0].lower().endswith("powershell.exe") or call.argv[0] == "powershell"
     assert "-NoProfile" in call.argv
     assert "-NonInteractive" in call.argv
+
+
+def test_powershell_is_windows_own_copy(monkeypatch, tmp_path):
+    """Not the first "powershell" on PATH, which anyone can put there."""
+    exe = tmp_path / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    monkeypatch.setenv("SystemRoot", str(tmp_path))
+    assert _dispatch(monkeypatch, "T", "M").argv[0] == str(exe)
 
 
 def test_dispatch_does_not_block(monkeypatch):

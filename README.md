@@ -89,11 +89,16 @@ settings in its own folder (that's what the `portable.txt` beside it does), and 
 - The bottom panel has two views: **Store changes** (everything that changed anywhere in the store) and
   **Activity** (what the watcher did). Drag its top edge to resize it.
 - **History** lists the changes to your watched products, or to the whole store. Double-click a line to open the
-  product; **Export CSV…** saves the lot.
+  product; **Export CSV…** saves what the list shows (it opens in Excel with € and £ intact).
 - **Settings** take effect as you change them: how often to check, the store, the alerts (on your phone too),
   Start with Windows, the theme and accent colour, text size, and importing or exporting the watch list.
 - The tray icon is grey when idle, blue while watching, and gets a green dot when something you watch is in
-  stock. Click it to open the window; right-click for Start/Stop, Check now and Quit.
+  stock (not for a muted one). Click it to open the window; right-click for Start/Stop, Check now and Quit.
+- Each return to stock alerts once. A product that's already in stock when the app starts doesn't alert again;
+  one that came back while it was closed does. Alerts that arrive together share one notification, which opens
+  the window.
+- When the store can't be reached, the header says so and the Activity view says it once. The app then checks
+  less often, doubling the wait up to half an hour, until the store answers (**Check now** still checks at once).
 
 ## Alerts on your phone
 
@@ -147,8 +152,8 @@ Any address gets a POST with this JSON. `event` is `in_stock`, `price_drop` (wit
 The app talks to two places, and a third if you ask it to:
 
 - `store.ui.com`, to read the catalog: one check is 8 requests, at the interval you choose (1 minute by default,
-  never faster than 15 seconds). Once a day it also reads the store's home page, to notice new product
-  categories.
+  never faster than 15 seconds), and less often while the store isn't answering. Every 5 minutes it also reads
+  the store's home page for the site's current build, and once a day to notice new product categories.
 - GitHub, once a day, for this project's `latest.json` (turn it off in **Settings → Updates**). Nothing is
   downloaded until you click **Install**. Installed copies then run the new installer silently and restart;
   portable copies swap their program files in place and restart, and put everything back if that fails.
@@ -177,8 +182,8 @@ It uses the same watch list and settings as the app. Run it from Task Scheduler 
 |---|---|
 | No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. A muted product (crossed-out bell), or one that isn't a favourite with **Only for favourites** on, never alerts; the **Activity** view says *no alert* and why. |
 | Nothing on the phone | **Settings → Alerts on your phone → Send a test** shows what the service answered, e.g. *HTTP 404 (Unknown Webhook)* for a deleted Discord webhook. For ntfy, check the app is subscribed to exactly the topic in the address. The PC has to be on and watching. |
-| "Couldn't reach the store" | The store or your connection is down; the watcher keeps trying at every interval. |
-| A product shows **DELISTED** | The store doesn't list it any more (renamed or discontinued). Remove it, and add the new one from the catalog. |
+| "Can't reach the store" | The store or your connection is down, or the store is refusing requests. The watcher keeps trying, less often each time (up to every half hour), and says when it's answering again. |
+| A product shows **DELISTED** | The store doesn't list it any more (renamed, discontinued, or pulled for a while). It's watched again as soon as it's back in the catalog, and its own page is asked again every 6 hours. If it was renamed, add the new one from the catalog. |
 | Stock looks wrong for one product | [Open an issue](https://github.com/jamesccupps/UnifiStockWatcher/issues/new?template=bug_report.yml) with its store link. A nightly check against the real store catches most changes on Ubiquiti's side the day they ship. |
 | The window is gone | It's in the notification area (click the tray icon). Starting the app again also brings it back. |
 | "Windows protected your PC" | **More info → Run anyway**. The app isn't code-signed. |

@@ -251,6 +251,13 @@ def test_a_retry_honours_retry_after_up_to_a_cap(post):
     assert waits == [7, webhooks.MAX_RETRY_AFTER]
 
 
+@pytest.mark.parametrize("value, wait", [("nan", 0), ("inf", webhooks.MAX_RETRY_AFTER),
+                                         ("-inf", 0), ("-5", 0), ("soon", 0)])
+def test_an_odd_retry_after_still_retries(value, wait):
+    """Regression: "nan" parsed, and time.sleep(nan) raised, ending the retries."""
+    assert webhooks._retry_after(FakeResponse(429, headers={"Retry-After": value})) == wait
+
+
 def test_retries_give_up_with_the_last_reason(post):
     rec = post(FakeResponse(503))
     reason = webhooks.send(SLACK, alert(), attempts=3, sleep=lambda s: None)

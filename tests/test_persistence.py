@@ -23,6 +23,42 @@ def test_read_json_returns_default_for_missing_file(tmp_path):
     assert unifi_core.read_json(tmp_path / "nope.json", {"d": 1}) == {"d": 1}
 
 
+def test_writers_never_share_a_temp_file(tmp_path):
+    """Regression: every write went through "<name>.tmp", so the app and the
+    CLI writing at once could swap in each other's half-written file."""
+    path = tmp_path / "x.json"
+    (tmp_path / "x.json.tmp").mkdir()          # the old fixed name, taken
+    unifi_core.write_json(path, [1])
+    assert unifi_core.read_json(path, None) == [1]
+    assert [p.name for p in tmp_path.iterdir()] == ["x.json", "x.json.tmp"]
+
+
+def test_a_briefly_locked_file_is_written_anyway(tmp_path, monkeypatch):
+    """Antivirus and OneDrive hold a file they've just seen change."""
+    real, calls = unifi_core.os.replace, []
+
+    def locked_twice(src, dst):
+        calls.append(1)
+        if len(calls) <= 2:
+            raise PermissionError("in use")
+        return real(src, dst)
+    monkeypatch.setattr(unifi_core.os, "replace", locked_twice)
+    monkeypatch.setattr(unifi_core.time, "sleep", lambda s: None)
+    unifi_core.write_json(tmp_path / "x.json", {"a": 1})
+    assert unifi_core.read_json(tmp_path / "x.json", None) == {"a": 1} and len(calls) == 3
+    assert [p.name for p in tmp_path.iterdir()] == ["x.json"]
+
+
+@pytest.mark.parametrize("slug", ["u7-pro\n", "u7-pro\r\n"])
+def test_a_slug_with_a_line_break_is_refused(slug):
+    """`$` matches before a final newline; a slug goes into store URLs."""
+    assert not unifi_core.is_valid_slug(slug)
+
+
+def test_an_accent_with_a_line_break_is_refused():
+    assert not unifi_core._valid_setting("accent", "#00897b\n")
+
+
 def test_read_json_returns_default_for_corrupt_file(tmp_path):
     path = tmp_path / "bad.json"
     path.write_text("{not json at all", encoding="utf-8")
@@ -454,6 +490,66 @@ def test_history_ignores_other_currencies_and_store_wide_prices(tmp_path):
     (None, None), ("", None), ("free", None)])
 def test_price_amount(text, amount):
     assert unifi_core.price_amount(text) == amount
+
+
+def test_a_check_that_changes_nothing_doesnt_rewrite_the_file(tmp_path):
+    """Regression: the check counter marked the history dirty, so every
+    cycle rewrote and fsync'd the whole file, about 1 MB once full."""
+    path = tmp_path / "h.json"
+    h = unifi_core.StockHistory(path=path)
+    h.record("a", "A", False)
+    h.flush()
+    saved = path.read_bytes()
+    for _ in range(10):
+        h.record("a", "A", False)
+        h.flush()
+    assert path.read_bytes() == saved
+    h.flush(final=True)                          # on the way out, the counters too
+    assert unifi_core.read_json(path, {})["stats"]["total_checks"] == 11
+
+
+def test_the_counters_are_saved_every_few_minutes(tmp_path, monkeypatch):
+    path = tmp_path / "h.json"
+    h = unifi_core.StockHistory(path=path)
+    h.record("a", "A", False)
+    h.flush()
+    h.record("a", "A", False)
+    monkeypatch.setattr(unifi_core.time, "monotonic",
+                        lambda: h._saved_at + unifi_core.COUNTS_SAVE_EVERY + 1)
+    h.flush()
+    assert unifi_core.read_json(path, {})["stats"]["total_checks"] == 2
+
+
+def test_the_history_file_is_compact(tmp_path):
+    path = tmp_path / "h.json"
+    h = unifi_core.StockHistory(path=path)
+    h.record("a", "A", True)
+    h.flush()
+    assert "\n" not in path.read_text(encoding="utf-8")
+
+
+def test_store_wide_changes_are_trimmed_before_watched_ones(tmp_path, monkeypatch):
+    """Regression: about 490 products' changes shared one cap with the watch
+    list, and pushed the watched products' history out."""
+    monkeypatch.setattr(unifi_core, "MAX_HISTORY_EVENTS", 10)
+    h = unifi_core.StockHistory(path=tmp_path / "h.json", autosave_after=1)
+    for i in range(4):
+        h.record(f"w{i}", "W", False)
+    for i in range(20):
+        h.record(f"x{i}", "X", True, watched=False)
+    events = unifi_core.read_json(tmp_path / "h.json", {})["events"]
+    assert len(events) == 10
+    assert [e["slug"] for e in events if e["watched"]] == ["w0", "w1", "w2", "w3"]
+    assert events[-1]["slug"] == "x19"
+
+
+def test_last_state(tmp_path):
+    h = unifi_core.StockHistory(path=tmp_path / "h.json")
+    assert h.last_state("a") is None
+    h.record("a", "A", True)
+    assert h.last_state("a") is True
+    h.record("a", "A", False)
+    assert h.last_state("a") is False
 
 
 def test_record_check_keeps_its_2x_name(tmp_path):

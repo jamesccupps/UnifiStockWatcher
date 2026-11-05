@@ -65,6 +65,10 @@ to an empty folder is the safe way to run a build.
   data there too), `installed` (Inno's `unins000.exe` beside it), `folder` (frozen, neither: data in %APPDATA%,
   updates like portable). The zip carries `portable.txt`; the installer's folder must not (build_windows.py and
   test_installer.ps1 check). The portable swap never copies `portable.txt` into a folder that didn't have it.
+- **The portable swap** (`updater.swap_in`) counts a name as placed *before* copying it, so a folder half-copied
+  when it fails is removed and its `.old` renamed back; one that can't be is `SwapFailed`, and its `.old` is the
+  only copy. A successful swap lists what it renamed in `.update-swapped.json`; `cleanup_after_update` removes
+  those `.old` copies only, and runs only after `--updated` (`_after_update`), never `--update-failed`.
 - **2.x migration** copies (never moves, never overwrites) 2.x files from beside the program into %APPDATA% once,
   then reloads `stock_history`, which was loaded at import: without the reload its first flush would write an
   empty history over the copied one.
@@ -80,7 +84,22 @@ to an empty folder is the safe way to run a build.
   finding the same product together alert once. Whether it alerts at all is `wants_alert()` (muted, favourites
   only, phone favourites only), asked in `_on_in_stock` on the main thread; a muted return still marks
   `notified`, so unmuting an in-stock product waits for its next return. Price changes are decided inside
-  `StockHistory.record` (under its lock, so also once) and posted by `_recorded`.
+  `StockHistory.record` (under its lock, so also once) and posted by `_recorded`. At start `notified` is seeded
+  from `stock_history.last_state()` (`_seed_notified`; the CLI likewise): seeded empty, every launch alerted for
+  everything already in stock.
+- **The cycle** (`_cycle`): `fetch_all_products` raises `StoreError` when no category answers (an empty catalog
+  read as "no products"); failed categories come back through `error_cb`. Not reaching the store, or a 429/503
+  on a category, is `_store_trouble`: said once, "Can't reach the store" in the header, and `_watch_loop` backs off
+  (interval × 2^failures, up to `MAX_BACKOFF`); a refusing store is never asked product by product. With
+  categories missing, the baseline is merged, not replaced. Products are parsed defensively (`_variants`,
+  `_objects`, numeric `amount` only) and each in its own try. `_store_gen` is bumped on a store change: a
+  cycle or quick check that sees it change drops its results. Stop ends a watch-loop cycle at the next product;
+  Start while it finishes waits for it (`_start_when_idle`). `_delisted` is slug → time: the catalog is looked
+  at first, the product's own page again after `DELISTED_RECHECK`, and add/remove forget it.
+- **Notifications close together merge** (`_notify`, `TOAST_MERGE`): the tray has one click slot and Windows
+  doesn't say which toast was clicked, so a merged one opens the window.
+- **Errors in Tk callbacks** go to `report_callback_exception` (`_callback_failed`: logged, and a dialog at most
+  every 10 s): the windowed build has no stderr. `setup_logging` sets `threading.excepthook` too.
 - **ttk image elements tile, they don't stretch.** A 9-slice image with a few-pixel middle made one card ~1000
   alpha-blended blits per redraw, and the Settings page took seconds per style change. `Theme._put(..., grow=)`
   draws small and widens the uniform middle with `gfx.expand9` (96-240 px). Keep any new sliced image grown.
@@ -99,7 +118,12 @@ to an empty folder is the safe way to run a build.
 - **History** logs changes only, plus a watched product's first state (`first: true`, shown as "Added: …").
   Store-wide changes (`watched: false`) are never "first". `alerts` counts notifications, not in-stock checks.
   A watched product's price change is an event with `price_was`, against the last price recorded (so across
-  restarts); `None` and a different currency symbol aren't changes. The changes feed leaves them out.
+  restarts); `None` and a different currency symbol aren't changes. The changes feed leaves them out. A check
+  that changes nothing only bumps `total_checks` in memory: counters are saved every `COUNTS_SAVE_EVERY` and by
+  `flush(final=True)` (quit, atexit), because marking the file dirty per check rewrote it (≈1 MB) every cycle. The
+  file is written unindented; trimming to the cap drops store-wide events first.
+- **Data files** go through `write_json`: a unique `mkstemp` temp name beside the file (the app and the CLI can
+  write at once), fsync, `os.replace` retried for a second on `PermissionError` (antivirus, OneDrive).
 - **Notifications** are the tray icon's balloons (Windows shows them as toasts under the app's name); a click
   runs that balloon's callback. Installed copies set the AppUserModelID `JamesCupps.UnifiStockWatcher`, which the
   installer also puts on the Start menu shortcut. The CLI keeps the PowerShell NotifyIcon, with title and text
@@ -116,7 +140,9 @@ to an empty folder is the safe way to run a build.
   real phone. Checked against the real ntfy.sh (title, click, actions, priority, tags all parsed); Pushover,
   Discord and Slack against their documented APIs only.
 - **Start with Windows** writes `HKCU\...\Run\UniFi Stock Watcher` only when it has to change (Defender flags
-  programs that keep rewriting Run keys), and points it at the running copy if it moved. Uninstall removes it.
+  programs that keep rewriting Run keys). `refresh_autostart` repoints it at the running copy only when the
+  program it names no longer exists, and only from `main()`: from the window's constructor, every self-test,
+  `demo.py` run and test run took it over. Uninstall removes it.
 - **Single instance**: the named mutex `JamesCupps.UnifiStockWatcher`; a second copy finds the tray window
   (class `UnifiStockWatcherTray`) and posts `WM_SHOW_WINDOW` to it. Inno Setup waits on the same mutex.
 - The tray's window class is registered once per process with one module-level window procedure; a

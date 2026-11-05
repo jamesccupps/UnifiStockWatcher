@@ -56,6 +56,9 @@ log = logging.getLogger("unifi_watcher.gui")
 
 MAX_LOG_LINES = 500
 MAX_CHANGE_LINES = 1000
+DELISTED_RECHECK = 6 * 3600   # seconds before a delisted product's own page is asked again
+MAX_BACKOFF = 1800            # the longest wait between checks while the store is out
+TOAST_MERGE = 8               # seconds: alerts this close together share one notification
 UPDATE_RECHECK_MS = 24 * 3600 * 1000
 ISSUE_URL = f"{REPO_URL}/issues/new?template=bug_report.yml&version={__version__}"
 SITE_URL = "https://jamesccupps.github.io/UnifiStockWatcher/"
@@ -171,8 +174,25 @@ def _wheel_target(widget):
     return None
 
 
+def fit_to_screen(win, w, h):
+    """(w, h), made small enough for the screen, with room for the taskbar
+    and the title bar."""
+    inch = win.winfo_fpixels("1i")              # pixels: 144 at 150%
+    return (min(w, int(win.winfo_screenwidth() - inch / 2)),
+            min(h, int(win.winfo_screenheight() - inch)))
+
+
+_wheel_rest = 0       # delta not yet scrolled: precision touchpads send small ones
+
+
 def _dispatch_wheel(event):
-    """Scroll whichever registered canvas is under the pointer."""
+    """Scroll whichever registered canvas is under the pointer.
+
+    A notch is 120; a touchpad sends a stream of smaller deltas. They add up
+    here and scroll a line per 120, keeping the rest: floor division made a
+    small scroll up do nothing and a small scroll down a whole line.
+    """
+    global _wheel_rest
     try:
         under = event.widget.winfo_containing(event.x_root, event.y_root)
     except (tk.TclError, KeyError):
@@ -180,10 +200,16 @@ def _dispatch_wheel(event):
     target = _wheel_target(under)
     if target is None:
         return None
-    try:
-        target.yview_scroll(-1 * (event.delta // 120), "units")
-    except tk.TclError:
-        return None
+    if (_wheel_rest > 0) != (event.delta > 0):
+        _wheel_rest = 0                 # turned round: start counting again
+    _wheel_rest += event.delta
+    lines = int(_wheel_rest / 120)      # towards zero, either way
+    _wheel_rest -= lines * 120
+    if lines:
+        try:
+            target.yview_scroll(-lines, "units")
+        except tk.TclError:
+            return None
     return "break"
 
 
@@ -338,8 +364,15 @@ class BrowseDialog(tk.Toplevel):
 
         T = self.T
         self.title("Add products")
-        self.geometry(f"{T.S(900)}x{T.S(640)}")
-        self.minsize(T.S(620), T.S(420))
+        # Inside the screen, and over the app: at 200% its 640 points were
+        # taller than a 1080p screen, with Add and Cancel below the edge.
+        w, h = fit_to_screen(self, T.S(900), T.S(640))
+        x = app.winfo_rootx() + (app.winfo_width() - w) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - h) // 3
+        x = min(max(0, x), max(0, self.winfo_screenwidth() - w))
+        y = min(max(0, y), max(0, self.winfo_screenheight() - h - T.S(48)))
+        self.geometry(f"{w}x{h}+{x}+{y}")
+        self.minsize(min(T.S(620), w), min(T.S(420), h))
         self.transient(app)
         T.style_window(self)
         self._build()
@@ -837,13 +870,21 @@ class HistoryTab(ttk.Frame):
             initialfile="unifi-stock-history.csv")
         if not path:
             return
-        with open(path, "w", newline="", encoding="utf-8") as fh:
-            w = csv.writer(fh)
-            w.writerow(["time", "product", "slug", "in_stock", "price", "watched", "price_was"])
-            for e in reversed(self._events()):
-                w.writerow([e.get("ts"), e.get("title"), e.get("slug"),
-                            e.get("in_stock"), e.get("price") or "", e.get("watched", True),
-                            e.get("price_was") or ""])
+        # utf-8-sig: without the byte-order mark Excel reads it as the local
+        # code page, and € and £ come out garbled.
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as fh:
+                w = csv.writer(fh)
+                w.writerow(["time", "product", "slug", "in_stock", "price", "watched", "price_was"])
+                for e in reversed(self._events()):
+                    w.writerow([e.get("ts"), e.get("title"), e.get("slug"),
+                                e.get("in_stock"), e.get("price") or "", e.get("watched", True),
+                                e.get("price_was") or ""])
+        except OSError as e:
+            messagebox.showerror("Couldn't export", f"Couldn't write {path}:\n\n{e.strerror or e}\n\n"
+                                 "If it's open in another program, close it and try again.",
+                                 parent=self)
+            return
         self.app._log(f"History exported to {path}", "ok")
 
     def _clear(self):
@@ -1215,7 +1256,12 @@ class SettingsTab(ttk.Frame):
             defaultextension=".json", filetypes=[("JSON", "*.json")],
             initialfile="unifi-watchlist.json", parent=self)
         if path:
-            n = export_watchlist(path)
+            try:
+                n = export_watchlist(path)
+            except OSError as e:
+                messagebox.showerror("Couldn't export", f"Couldn't write {path}:\n\n"
+                                     f"{e.strerror or e}", parent=self)
+                return
             messagebox.showinfo("Exported", f"Exported {n} product(s) to:\n{path}", parent=self)
 
     def _import(self):
@@ -1239,6 +1285,8 @@ class UnifiWatcherApp(tk.Tk):
                  check_updates=True):
         super().__init__()
         self.settings = load_settings()
+        self.report_callback_exception = self._callback_failed
+        self._error_shown_at = -60.0
         if start_minimized and use_tray and traymod.AVAILABLE:
             self.withdraw()                 # no flash before going to the tray
         self.title(APP_NAME)
@@ -1255,12 +1303,21 @@ class UnifiWatcherApp(tk.Tk):
         self.rows           = {}
         self.status         = {}     # slug -> (in_stock, checked_at, price, note)
         self.notified       = {}
+        self._seed_notified()
         self.watching       = False
         self.watcher_thread = None
         self._wake          = threading.Event()  # interrupts the poll countdown
         self._prev_status   = {}     # slug -> (in_stock, title, price, note), whole store
-        self._delisted      = set()  # slugs the store no longer carries
+        self._delisted      = {}     # slug -> when the store last said it's gone
+        self._store_gen     = 0      # bumped when the store changes: a cycle reading
+                                     # the old one drops what it found
+        self._store_down    = None   # since when no check has reached the store
+        self._failures      = 0      # cycles in a row that didn't, for the backoff
+        self._partial       = None   # the categories the last check couldn't read
+        self._bad_products  = set()  # slugs skipped for odd data (logged once)
+        self._start_pending = False  # Start clicked while the last check finishes
         self._closed        = False  # guards callbacks from worker threads
+        self._toasts        = []     # (monotonic time, title) of recent notifications
         self._log_lines     = deque(maxlen=MAX_LOG_LINES)
         self._changes       = deque(maxlen=MAX_CHANGE_LINES)
         self._change_count  = 0
@@ -1301,8 +1358,6 @@ class UnifiWatcherApp(tk.Tk):
                 and updater.install_kind() != "source":
             self.after(4000, lambda: self.check_for_updates(quiet=True))
 
-        winplatform.refresh_autostart()
-
         self.after(50, self._drain)
         self.bind("<F5>", lambda _: self._force_check())
         self.bind("<Control-n>", lambda _: self._open_browse())
@@ -1312,6 +1367,21 @@ class UnifiWatcherApp(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ── Thread plumbing ───────────────────────────────────────────────
+
+    def _callback_failed(self, exc, val, tb):
+        """An error in a button, menu or timer callback. The frozen app has no
+        console, so Tk's own report went nowhere: an export to a file Excel
+        had open just did nothing. Logged, and said (at most every 10 s)."""
+        log.error("A UI callback failed", exc_info=(exc, val, tb))
+        now = time.monotonic()
+        if now - self._error_shown_at < 10:
+            return
+        self._error_shown_at = now
+        try:
+            messagebox.showerror(APP_NAME, f"Something went wrong: {val}\n\nThe details are in "
+                                 f"{LOG_FILE.name} (Settings → About → Open folder).", parent=self)
+        except tk.TclError:
+            pass
 
     def _post(self, fn, *args):
         """Run fn on the Tk thread soon, unless the window has closed.
@@ -1355,7 +1425,9 @@ class UnifiWatcherApp(tk.Tk):
     def _restore_geometry(self):
         S = self.theme.S
         self.minsize(S(560), S(460))
-        w, h = S(780), S(720)
+        # The default inside the screen, taskbar and title bar allowed for:
+        # 720 points is 1,080 px at 150%, all of a 1080p screen.
+        w, h = fit_to_screen(self, S(780), S(720))
         g = self.settings.get("window")
         if g and winplatform.point_on_screen(g[0] + 40, g[1] + 20):
             self.geometry(f"{max(g[2], S(560))}x{max(g[3], S(460))}+{g[0]}+{g[1]}")
@@ -1401,7 +1473,7 @@ class UnifiWatcherApp(tk.Tk):
         self.watching = False
         self._wake.set()
         try:
-            stock_history.flush()
+            stock_history.flush(final=True)
         except Exception:
             log.exception("Could not flush stock history on exit")
         if self.tray:
@@ -1632,7 +1704,13 @@ class UnifiWatcherApp(tk.Tk):
     def _on_settings_apply(self, new_settings):
         old = self.settings
         self.settings = dict(new_settings)
-        save_settings(self.settings)
+        try:
+            save_settings(self.settings)
+        except OSError as e:
+            # They still take effect now; only the next start won't have them.
+            log.warning("Could not save settings: %s", e)
+            self._log(f"Couldn't save the settings ({e.strerror or e}); they apply until the "
+                      "app closes.", "err")
         if old.get("region", "us") != self.settings.get("region", "us"):
             self._on_region_changed(old.get("region", "us"), self.settings.get("region", "us"))
         if any(old.get(k) != self.settings.get(k) for k in ("theme", "accent", "font_size")):
@@ -1657,6 +1735,9 @@ class UnifiWatcherApp(tk.Tk):
         """Drop state that only made sense for the previous store."""
         # The catalog baseline is per-region; keeping it would diff US prices
         # and stock against EU ones and report the whole store as "changed".
+        # A cycle still reading the old store sees the generation change and
+        # drops its results, rather than storing them or alerting from them.
+        self._store_gen += 1
         self._prev_status = {}
         self.notified.clear()
         self._delisted.clear()      # a slug absent from one store may exist in another
@@ -1727,8 +1808,8 @@ class UnifiWatcherApp(tk.Tk):
             return
         in_stock = [slug for slug, s in self.status.items() if s[0] and slug in self.rows]
         n_in = len(in_stock)
-        # Red only for products that alert: a muted one that stays in stock
-        # would otherwise keep it red for good.
+        # The in-stock dot only for products that alert: a muted one that
+        # stays in stock would otherwise keep it there for good.
         hot = any(wants_alert(self.settings, self.rows[slug].item) for slug in in_stock)
         state = "alert" if hot else ("watching" if self.watching else "idle")
         n = len(self.watched)
@@ -1743,6 +1824,7 @@ class UnifiWatcherApp(tk.Tk):
     def _remove_item(self, item):
         self.watched = [w for w in self.watched if w["slug"] != item["slug"]]
         self.status.pop(item["slug"], None)
+        self._delisted.pop(item["slug"], None)
         save_watched(self.watched)
         self._refresh_list()
         self._log(f"Removed {item['title']}", "warn")
@@ -1776,11 +1858,15 @@ class UnifiWatcherApp(tk.Tk):
 
         def run():
             try:
+                gen      = self._store_gen
                 region   = self.settings.get("region", "us")
                 build_id = get_build_id(region)
                 in_stock, price = check_slug(build_id, item["slug"], region)
+                if gen != self._store_gen:
+                    return                  # the store changed meanwhile
                 note = None
                 checked  = datetime.now().strftime("%H:%M")
+                self._back_on_store(item)
                 self._recorded(item, stock_history.record(
                     item["slug"], item["title"], in_stock, price))
                 self._post(self._update_row, item["slug"], in_stock, checked, price, note)
@@ -1790,7 +1876,7 @@ class UnifiWatcherApp(tk.Tk):
                 self._prev_status[item["slug"]] = (in_stock, item["title"], price, note)
                 self._maybe_alert(item, in_stock)
             except ProductNotFound:
-                self._delisted.add(item["slug"])
+                self._delisted[item["slug"]] = time.monotonic()
                 self._post(self._mark_delisted, item["slug"], item["title"])
             except Exception as e:
                 log.exception("Quick-check failed for %s", item["slug"])
@@ -1803,6 +1889,8 @@ class UnifiWatcherApp(tk.Tk):
     def _add_items(self, picks):
         existing = {w["slug"] for w in self.watched}
         added = [p for p in picks if p["slug"] not in existing]
+        for p in added:
+            self._delisted.pop(p["slug"], None)     # added again: look it up again
         self.watched.extend(added)
         save_watched(self.watched)
         self._refresh_list()
@@ -1821,10 +1909,16 @@ class UnifiWatcherApp(tk.Tk):
             self._set_status("Idle", "text3")
             self._log("Stopped watching.", "warn")
         else:
-            if self.watcher_thread and self.watcher_thread.is_alive():
-                return              # previous loop still winding down
             if not self.watched:
                 messagebox.showinfo(APP_NAME, "Add some products to watch first.", parent=self)
+                return
+            if self.watcher_thread and self.watcher_thread.is_alive():
+                # The last check is still finishing (a stop ends it at the
+                # next product): start as soon as it has, not never.
+                self._set_status("Finishing the last check…", "amber")
+                if not self._start_pending:
+                    self._start_pending = True
+                    self.after(250, self._start_when_idle)
                 return
             self.watching = True
             self._wake.clear()
@@ -1836,11 +1930,23 @@ class UnifiWatcherApp(tk.Tk):
             self.watcher_thread.start()
         self._update_tray()
 
+    def _start_when_idle(self):
+        if self._closed:
+            return
+        if self.watcher_thread and self.watcher_thread.is_alive():
+            self.after(250, self._start_when_idle)
+            return
+        self._start_pending = False
+        if not self.watching:
+            self._toggle_watch()
+
     def _force_check(self):
         if self.watching:
             self._wake.set()
             self._log("Checking now…", "info")
-        elif not (self.watcher_thread and self.watcher_thread.is_alive()):
+        elif self.watcher_thread and self.watcher_thread.is_alive():
+            self._log("A check is already running.", "info")
+        else:
             # Not watching: one check, then back to idle.
             self._log("Checking once…", "info")
             self.watcher_thread = threading.Thread(
@@ -1874,30 +1980,94 @@ class UnifiWatcherApp(tk.Tk):
             # than at the start of the countdown. Clearing it later would
             # discard a Check Now pressed *during* the fetch.
             self._wake.clear()
-            self._cycle()
+            reached = self._cycle(while_watching=True)
             if self.watching:
-                self._post(self._set_status, "Watching", "green")
-                self._wait_for_next_cycle(self.settings.get("poll_interval", 60))
+                interval = self.settings.get("poll_interval", 60)
+                if reached:
+                    self._post(self._set_status, "Watching", "green")
+                else:
+                    # The store is out or refusing: ask less often, doubling
+                    # up to half an hour, until it answers. Check now still works.
+                    interval = min(interval * 2 ** min(self._failures, 5),
+                                   max(interval, MAX_BACKOFF))
+                self._wait_for_next_cycle(interval)
 
-    def _cycle(self):
-        """One check of the whole store: diff it, update the watched rows."""
+    def _store_trouble(self, reason):
+        """A check that didn't reach the store: said once, then retried
+        quietly (with the backoff) until one does."""
+        self._failures += 1
+        if self._store_down is None:
+            self._store_down = datetime.now()
+            self._post(self._log, f"Couldn't reach the store: {reason}. Trying again, "
+                                  "less often, until it answers.", "err")
+        self._post(self._set_status, "Can't reach the store", "amber")
+
+    def _store_reached(self):
+        self._failures = 0
+        if self._store_down is not None:
+            since, self._store_down = self._store_down, None
+            self._post(self._log, "The store is answering again "
+                                  f"(it wasn't since {since:%H:%M}).", "ok")
+
+    def _back_on_store(self, item):
+        """On a worker: a product marked delisted turned up again."""
+        if self._delisted.pop(item["slug"], None) is not None:
+            self._post(self._log, f"{item['title']} is back on the store.", "ok")
+
+    def _cycle(self, while_watching=False):
+        """One check of the whole store: diff it, update the watched rows.
+        True if it reached the store. A cycle of the watch loop ends at the
+        next product once watching stops; any cycle drops what it found if
+        the store was changed meanwhile."""
         self._post(self._set_status, "Checking…", "amber")
+        gen = self._store_gen
         region = self.settings.get("region", "us")
         # At most once a day (category_cache.json says when), so a watcher
         # left running for weeks still notices a new store category.
         self._check_store_layout()
+        failed = {}                  # category -> its error
         try:
             build_id = get_build_id(region)
-            all_products = fetch_all_products(build_id, region)
+            all_products = fetch_all_products(
+                build_id, region, error_cb=lambda cat, e: failed.__setitem__(cat, e))
+        except Exception as e:
+            log.warning("Store check failed: %s", e)
+            self._store_trouble(str(e))
+            return False
+        if gen != self._store_gen:
+            return True
+        # Rate-limited or overloaded: asking product by product would only
+        # multiply the requests it is refusing.
+        refusing = any(getattr(getattr(e, "response", None), "status_code", None) in (429, 503)
+                       for e in failed.values())
+        if refusing:
+            self._store_trouble(f"it's refusing requests ({len(failed)} of its categories)")
+        else:
+            self._store_reached()
+        names = ", ".join(sorted(failed)) or None
+        if names and names != self._partial:
+            self._post(self._log, f"Couldn't read {len(failed)} of the store's categories "
+                                  f"({names}); checked the rest.", "warn")
+        self._partial = names
+        try:
             checked = datetime.now().strftime("%H:%M")
             watched_slugs = {w["slug"] for w in self.watched}
 
             current_status = {}      # slug -> (in_stock, title, price, note)
             for p in all_products:
                 slug = p.get("slug")
-                if slug:
-                    current_status[slug] = (is_available(p), p.get("title", slug),
+                if not slug:
+                    continue
+                try:
+                    current_status[slug] = (is_available(p), str(p.get("title") or slug),
                                             get_price(p), restock_note(p))
+                except Exception:
+                    # One product in a shape the app doesn't know must not
+                    # stop the check of all the others.
+                    if slug not in self._bad_products:
+                        self._bad_products.add(slug)
+                        log.warning("Skipping %s: its data isn't the usual shape", slug,
+                                    exc_info=True)
 
             if self._prev_status:
                 changes = 0
@@ -1915,39 +2085,63 @@ class UnifiWatcherApp(tk.Tk):
             else:
                 self._post(self._log, f"Baseline: {len(current_status)} products in the catalog.",
                            "info")
-            self._prev_status = current_status
+            if gen != self._store_gen:
+                return True
+            # With categories missing, their products keep their last state
+            # in the baseline, so their changes still show when they're back.
+            self._prev_status = {**self._prev_status, **current_status} if failed \
+                else current_status
 
             for item in list(self.watched):
-                if self._closed:
+                if self._closed or gen != self._store_gen \
+                        or (while_watching and not self.watching):
                     break
                 slug, title = item["slug"], item["title"]
-                if slug in self._delisted:
-                    continue
                 entry = current_status.get(slug)
                 if entry:
+                    self._back_on_store(item)
                     in_stock, _, price, note = entry
+                elif refusing:
+                    continue
+                elif time.monotonic() - self._delisted.get(slug, -DELISTED_RECHECK) \
+                        < DELISTED_RECHECK:
+                    continue
                 else:
                     # Not in the catalog: either genuinely delisted, or a
-                    # product the category pages do not carry. Ask directly.
+                    # product the category pages do not carry. Ask directly,
+                    # once if the catalog was incomplete.
                     note = None
                     try:
                         in_stock, price = check_slug(
                             build_id, slug, region,
-                            retries=self.settings.get("max_retries", 3))
+                            retries=1 if failed else self.settings.get("max_retries", 3))
                     except ProductNotFound:
-                        self._delisted.add(slug)
-                        self._post(self._mark_delisted, slug, title)
+                        if slug not in self._delisted:
+                            self._post(self._mark_delisted, slug, title)
+                        self._delisted[slug] = time.monotonic()
                         continue
                     except StoreError as e:
                         self._post(self._log, f"Couldn't check {title}: {e}", "err")
                         continue
+                    if gen != self._store_gen:
+                        break
+                    self._back_on_store(item)
                 self._recorded(item, stock_history.record(slug, title, in_stock, price))
                 self._post(self._update_row, slug, in_stock, checked, price, note)
                 self._maybe_alert(item, in_stock)
             stock_history.flush()
         except Exception as e:
-            log.warning("Store check failed: %s", e)
-            self._post(self._log, f"Couldn't reach the store: {e}", "err")
+            log.exception("Store check failed")
+            self._post(self._log, f"The check stopped: {e}", "err")
+        return not refusing
+
+    def _seed_notified(self):
+        """Each watched product starts as already alerted if the history last
+        saw it in stock: every launch (Start with Windows, the restart after
+        an update) used to alert again for everything already in stock. One
+        that came back while the app was closed still alerts."""
+        for w in self.watched:
+            self.notified.setdefault(w["slug"], stock_history.last_state(w["slug"]) is True)
 
     def _maybe_alert(self, item, in_stock):
         """Alert once per return to stock. Marked here, on the worker, so a
@@ -2070,6 +2264,15 @@ class UnifiWatcherApp(tk.Tk):
             done(where, reason)
 
     def _notify(self, title, text, url=None):
+        """A notification. Windows doesn't say which one was clicked, so
+        alerts within TOAST_MERGE seconds of each other become one, which
+        opens the window (each has its card there): before, a click on any
+        of them opened the last one's product."""
+        now = time.monotonic()
+        self._toasts = [t for t in self._toasts if now - t[0] < TOAST_MERGE] + [(now, title)]
+        if len(self._toasts) > 1:
+            text = "; ".join(t[1] for t in self._toasts)
+            title, url = f"{len(self._toasts)} alerts from {APP_NAME}", None
         if self.tray:
             self.tray.notify(title, text,
                              on_click=(lambda: webbrowser.open(url)) if url else
@@ -2330,6 +2533,21 @@ def self_test():
     return 0 if report.get("ok") else 1
 
 
+def _after_update(argv, settings):
+    """After an update restarted the app: whether to resume watching. Only a
+    successful one cleans up its .old copies; after a failed one they may be
+    the only good copy of the program."""
+    if "--updated" not in argv and "--update-failed" not in argv:
+        return False
+    if "--updated" in argv:
+        updater.cleanup_after_update()
+    resume = bool(settings.get("resume_watching"))
+    if resume:
+        settings["resume_watching"] = False
+        save_settings(settings)
+    return resume
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--finish-update" in argv:
@@ -2360,14 +2578,8 @@ def main(argv=None):
     if updater.install_kind() == "installed":
         winplatform.set_app_id(APP_ID)
 
-    settings = load_settings()
-    resume = False
-    if "--updated" in argv or "--update-failed" in argv:
-        updater.cleanup_after_update()
-        resume = bool(settings.get("resume_watching"))
-        if resume:
-            settings["resume_watching"] = False
-            save_settings(settings)
+    resume = _after_update(argv, load_settings())
+    winplatform.refresh_autostart()
 
     app = UnifiWatcherApp(start_minimized="--minimized" in argv,
                           watch_now="--watch" in argv or resume)
@@ -2380,7 +2592,7 @@ def main(argv=None):
     try:
         app.mainloop()
     finally:
-        stock_history.flush()
+        stock_history.flush(final=True)
         instance.release()
     return 0
 

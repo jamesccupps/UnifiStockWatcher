@@ -72,7 +72,7 @@ class UpdateError(Exception):
 
 
 def parse_version(v):
-    m = _VERSION_RE.match(v) if isinstance(v, str) else None
+    m = _VERSION_RE.fullmatch(v) if isinstance(v, str) else None
     return tuple(int(x) for x in m.groups()) if m else None
 
 
@@ -103,11 +103,11 @@ def _check_asset(asset, name):
         raise UpdateError(f"{name}: not an object")
     f, size, sha = asset.get("file"), asset.get("size"), asset.get("sha256")
     # A bare file name: the manifest says what to fetch, never from where.
-    if not (isinstance(f, str) and _FILE_RE.match(f)):
+    if not (isinstance(f, str) and _FILE_RE.fullmatch(f)):
         raise UpdateError(f"{name}: bad file name {f!r}")
     if not (isinstance(size, int) and not isinstance(size, bool) and 0 < size <= MAX_DOWNLOAD):
         raise UpdateError(f"{name}: bad size {size!r}")
-    if not (isinstance(sha, str) and _SHA_RE.match(sha)):
+    if not (isinstance(sha, str) and _SHA_RE.fullmatch(sha)):
         raise UpdateError(f"{name}: bad sha256")
     return {"file": f, "size": size, "sha256": sha}
 
@@ -377,11 +377,21 @@ def _remove(p):
         p.unlink()
 
 
+SWAPPED_LIST = ".update-swapped.json"   # beside the program: what the swap renamed
+
+
+class SwapFailed(UpdateError):
+    """A swap failed, and some of the old program couldn't be put back."""
+
+
 def swap_in(app_dir, staged):
     """Replace app_dir's program files with staged's. Data files stay put.
 
-    Each item is renamed to <name>.old first and only then copied in; on any
-    failure the copies are removed and the .old items renamed back.
+    Each item is renamed to <name>.old first and only then copied in. On any
+    failure everything copied, even half-way, is removed and the .old items
+    renamed back; SwapFailed names any that couldn't be, whose .old copy is
+    then the only one. The names renamed go into SWAPPED_LIST, so the updated
+    app removes those .old copies and nothing else.
     """
     app_dir, staged = Path(app_dir), Path(staged)
     names = [e.name for e in staged.iterdir()
@@ -395,24 +405,34 @@ def swap_in(app_dir, staged):
             if target.exists():
                 _retry(lambda: target.rename(old))
                 renamed.append(n)
+            # Counted before the copy: a folder half-copied when it fails is
+            # removed too, or its .old copy couldn't be renamed back.
+            placed.append(n)
             src = staged / n
             if src.is_dir():
                 shutil.copytree(src, target)
             else:
                 shutil.copy2(src, target)
-            placed.append(n)
-    except BaseException:
+    except BaseException as e:
         for n in placed:
             try:
                 _retry(lambda: _remove(app_dir / n), tries=10)
             except OSError:
                 pass
+        stuck = []
         for n in renamed:
             try:
                 _retry(lambda: (app_dir / (n + ".old")).rename(app_dir / n), tries=10)
             except OSError:
-                pass
+                stuck.append(n)
+        if stuck:
+            raise SwapFailed(f"{e!r}; couldn't put back {', '.join(stuck)} "
+                             f"(the previous copy is {', '.join(n + '.old' for n in stuck)})") from e
         raise
+    try:
+        (app_dir / SWAPPED_LIST).write_text(json.dumps(renamed), encoding="utf-8")
+    except OSError:
+        pass                                    # the .old copies just stay
 
 
 def finish_update(app_dir, pid):
@@ -429,6 +449,10 @@ def finish_update(app_dir, pid):
         return 1
     try:
         swap_in(app_dir, staged)
+    except SwapFailed as e:
+        _ulog(f"update: failed, and the old version couldn't all be put back: {e}", logfile)
+        _spawn([app_dir / GUI_EXE, "--update-failed"], cwd=app_dir)
+        return 1
     except Exception as e:
         _ulog(f"update: failed, old version restored: {e!r}", logfile)
         _spawn([app_dir / GUI_EXE, "--update-failed"], cwd=app_dir)
@@ -439,13 +463,23 @@ def finish_update(app_dir, pid):
 
 
 def cleanup_after_update():
-    """Remove what a swap leaves behind (*.old beside the program, staging
-    folders in %TEMP%). Run by the updated app; anything still locked is
+    """Remove what a successful swap leaves behind: the .old copies it lists
+    in SWAPPED_LIST (no other .old file beside the program is touched), and
+    staging folders in %TEMP%. Run by the updated app only: after a failed
+    update an .old copy may be the only good one. Anything still locked is
     left for next time."""
-    for p in program_dir().glob("*.old"):
-        try:
-            _remove(p)
-        except OSError:
-            pass
+    listing = program_dir() / SWAPPED_LIST
+    try:
+        names = json.loads(listing.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        names = []
+    for n in names if isinstance(names, list) else []:
+        # A bare name in this folder (the swap only ever wrote those), never a path.
+        if isinstance(n, str) and n not in ("", ".", "..") and Path(n).name == n:
+            try:
+                _remove(program_dir() / (n + ".old"))
+            except OSError:
+                pass
+    listing.unlink(missing_ok=True)
     for p in Path(tempfile.gettempdir()).glob("UnifiStockWatcher-update-*"):
         shutil.rmtree(p, ignore_errors=True)

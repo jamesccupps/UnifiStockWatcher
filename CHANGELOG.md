@@ -2,7 +2,59 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
-## Unreleased
+## v3.2.1
+
+Fixes from a review of 3.2.0. Each has a test that fails on 3.2.0.
+
+### Fixed
+
+- **Every launch alerted again** for each watched product already in stock (notification, sound, browser tab,
+  phone): `notified` started empty. It's now seeded from the history's last state (`StockHistory.last_state`), in
+  the app and the CLI; a product that came back while the app was closed still alerts.
+- **A product that 404'd once was skipped for the session**, even after it was back in the catalog. The catalog
+  is now looked at first; a delisted product's own page is asked again after 6 hours; removing or re-adding it
+  forgets it.
+- **One product in an unexpected shape failed the whole check** (`"variants": null`, a variant that isn't an
+  object, a text `amount`), and ended the CLI. Products are read defensively and one that still fails is skipped
+  and logged once; the CLI catches errors per product and per check.
+- **A store that answered no category** read as an empty catalog, "No changes across 0 products", and every
+  watched product was asked for on its own page, 3 tries each, every cycle. `fetch_all_products` raises
+  `StoreError` when every category fails. The app says so once ("Can't reach the store" in the header), and backs
+  off, doubling the wait up to 30 minutes, also when the store answers 429 or 503; then it's asked product by
+  product no more. A category that fails keeps its products' last state in the baseline. The CLI backs off too.
+- **A portable update that failed half-way through `_internal`** left the half-copied folder, so the old one
+  couldn't be put back, and the restarted old version's cleanup then deleted `_internal.old`. The rollback now
+  removes what it half-copied, says if anything couldn't be restored (`SwapFailed`), and the cleanup runs only
+  after a successful update and removes only the `.old` copies that swap made (`.update-swapped.json`).
+- **The history file was rewritten every check** (about 1 MB once full, with an fsync): the check counter marked
+  it dirty. Counters are saved every 10 minutes and on exit; events as before. The file is no longer indented, and
+  the 5,000-event cap drops store-wide changes before the watched products' history.
+- **Any other copy that started took over Start with Windows** (a portable copy tried once, a self-test in a temp
+  folder, the test suite): it's repointed only when the program it names no longer exists, and only from a real
+  start.
+- **Errors in button handlers vanished** in the frozen app (no console), e.g. exporting to a file open in Excel.
+  They're logged and shown; both exports catch their own errors; a settings save that fails is said and the change
+  still applies.
+- Changing the store during a check stored the old store's catalog as the new baseline and could alert "available
+  on the Europe store" from it: a check that sees the store change drops its results.
+- With two notifications up, clicking the first opened the second product (Windows doesn't say which was
+  clicked): alerts within 8 seconds now share one notification, which opens the window.
+- Start while a stopped check was finishing did nothing; Stop now ends the check at the next product, and Start
+  starts as soon as it has. Check now says when a check is already running.
+- Touchpad scrolling: small scrolls up did nothing and small scrolls down a whole line; deltas now add up.
+- The default window (and Add products) could be taller than the screen at 150-200%.
+- Restock and sold-out days were counted in UTC, so "back ~tomorrow" could be off by a day in the evening; a bare
+  restock date keeps its calendar day.
+- The CSV export had no byte-order mark, so Excel garbled € and £.
+- Smaller: `Retry-After: nan` from a webhook ended its retries; `^…$` validation accepted a trailing newline
+  (slugs, the accent colour, the update manifest's fields): `fullmatch`; data files are written through unique
+  temp names, and the rename is retried while antivirus holds the file; the CLI's notification runs Windows'
+  own `powershell.exe`, not the first on PATH; the frozen CLI never tries to pip-install; uncaught thread errors
+  are logged.
+- Light theme: faint text (every Settings description, placeholders) is 4.5:1 (was 2.5:1), dark 4.5:1 (3.4:1);
+  the light favourite star 3:1.
+- Docs: the 3.2.0 entry said the tray icon "turns red" (it gets the in-stock dot); the README said the home page
+  is read once a day (every 5 minutes, for the build ID) and that the CSV export saves everything (what's shown).
 
 ### Development
 
@@ -18,7 +70,7 @@ Each release's own notes (what users see on the release page) are in `release-no
   silences one product: still checked, still in the history, no notification, sound, page or phone alert. A
   crossed-out bell on the card unmutes it. **Only for favourites** in Alerts does the same for every product
   that isn't starred, and the one in Alerts on your phone for the phone only. `unifi_core.wants_alert()` decides,
-  for the app and the CLI. The tray icon turns red only for an in-stock product that alerts.
+  for the app and the CLI. The tray icon gets its in-stock dot only for an in-stock product that alerts.
 - Price changes. `StockHistory.record` logs a watched product's price change (`price_was` beside the new
   `price`) against the last price it recorded, so a change while the app was closed counts. No price isn't a
   change, nor is another currency (the store was switched), nor a store-wide product's price. History shows

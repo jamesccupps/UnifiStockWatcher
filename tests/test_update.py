@@ -283,6 +283,75 @@ def test_a_failed_swap_puts_everything_back(tmp_path, monkeypatch):
     assert not list(app.glob("*.old"))
 
 
+def _fail_half_way_through_internal(monkeypatch):
+    """copytree that copies one file of _internal and then fails (disk full,
+    antivirus holding a new file, a USB stick pulled)."""
+    def half(src, dst, *a, **k):
+        os.makedirs(dst)
+        (updater.Path(dst) / "lib.dll").write_bytes(b"half")
+        raise OSError("disk full")
+    monkeypatch.setattr(updater.shutil, "copytree", half)
+    monkeypatch.setattr(updater, "_retry", lambda fn, tries=40, delay=0.25: fn())
+
+
+def test_a_folder_half_copied_when_the_swap_fails_is_put_back(tmp_path, monkeypatch):
+    """Regression: a half-copied _internal wasn't counted as placed, so it
+    stayed, and the old one couldn't be renamed back over it."""
+    app, staged = _app_folder(tmp_path)
+    _fail_half_way_through_internal(monkeypatch)
+    with pytest.raises(OSError):
+        updater.swap_in(app, staged)
+    assert (app / "_internal" / "lib.dll").read_bytes() == b"old lib"
+    assert (app / updater.GUI_EXE).read_bytes() == b"old exe"
+    assert not list(app.glob("*.old"))
+
+
+def test_a_rollback_that_cant_finish_says_so_and_keeps_the_old_copy(tmp_path, monkeypatch):
+    app, staged = _app_folder(tmp_path)
+    _fail_half_way_through_internal(monkeypatch)
+    real_rename = updater.Path.rename
+
+    def no_rename_back(self, target):
+        if self.name == "_internal.old":
+            raise PermissionError("in use")
+        return real_rename(self, target)
+    monkeypatch.setattr(updater.Path, "rename", no_rename_back)
+    with pytest.raises(updater.SwapFailed, match="_internal.old"):
+        updater.swap_in(app, staged)
+    assert (app / "_internal.old" / "lib.dll").read_bytes() == b"old lib"
+
+
+def test_cleanup_removes_only_what_the_swap_renamed(tmp_path, monkeypatch):
+    """Regression: it removed every *.old beside the program, a user's own
+    files included, and it ran after a failed update too."""
+    app, staged = _app_folder(tmp_path)
+    (app / "notes.old").write_text("mine")
+    updater.swap_in(app, staged)
+    assert (app / "_internal.old").exists() and (app / (updater.GUI_EXE + ".old")).exists()
+    monkeypatch.setattr(updater, "program_dir", lambda: app)
+    monkeypatch.setattr(updater.tempfile, "gettempdir", lambda: str(tmp_path / "temp"))
+    updater.cleanup_after_update()
+    assert sorted(p.name for p in app.glob("*.old")) == ["notes.old"]
+    assert not (app / updater.SWAPPED_LIST).exists()
+
+
+def test_finish_update_says_when_the_old_version_isnt_whole(tmp_path, monkeypatch):
+    app, staged = _app_folder(tmp_path)
+    spawned = []
+    monkeypatch.setattr(updater, "program_dir", lambda: staged)
+    monkeypatch.setattr(updater, "_wait_for_exit", lambda pid, timeout=60: True)
+    monkeypatch.setattr(updater, "_spawn", lambda args, cwd: spawned.append(args))
+    monkeypatch.setattr(updater, "swap_in", lambda a, s: (_ for _ in ()).throw(
+        updater.SwapFailed("couldn't put back _internal")))
+    assert updater.finish_update(str(app), "123") == 1
+    assert "couldn't all be put back" in (app / "update.log").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("text", ["3.2.0\n", "3.2.0 ", " 3.2.0"])
+def test_a_version_with_anything_after_it_is_refused(text):
+    assert updater.parse_version(text) is None
+
+
 def test_finish_update_logs_and_restarts(tmp_path, monkeypatch):
     app, staged = _app_folder(tmp_path)
     spawned = []

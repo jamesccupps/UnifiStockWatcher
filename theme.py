@@ -23,7 +23,9 @@ from gfx import (Raster, contrast, mix, sd_circle, sd_polyline, sd_rrect)
 LIGHT = {
     "bg": "#f3f3f3", "surface": "#ffffff", "surface2": "#f7f7f7",
     "border": "#e3e3e3", "divider": "#e5e5e5",
-    "text": "#1b1b1b", "text2": "#5c5c5c", "text3": "#9b9b9b",
+    # text3 is every description and placeholder: 4.5:1 on the window and
+    # on cards (it was #9b9b9b, 2.5:1).
+    "text": "#1b1b1b", "text2": "#5c5c5c", "text3": "#6f6f6f",
     "control": "#fdfdfd", "control_hover": "#f6f6f6", "control_pressed": "#efefef",
     "control_border": "#d6d6d6", "control_border_bottom": "#c2c2c2",
     "strong_border": "#8a8a8a",
@@ -32,7 +34,7 @@ LIGHT = {
     "green": "#0f7b0f", "green_bg": "#dff6dd",
     "red": "#c42b1c", "red_bg": "#fde7e9",
     "amber": "#8a5300", "amber_bg": "#fff4ce",
-    "neutral_bg": "#ececec", "gold": "#c08a00",
+    "neutral_bg": "#ececec", "gold": "#b07d00",
     "scroll": "#a0a0a0", "scroll_hover": "#808080",
     "default_accent": "#0067c0",
 }
@@ -40,7 +42,7 @@ LIGHT = {
 DARK = {
     "bg": "#202020", "surface": "#2b2b2b", "surface2": "#323232",
     "border": "#363636", "divider": "#3a3a3a",
-    "text": "#ffffff", "text2": "#bdbdbd", "text3": "#7c7c7c",
+    "text": "#ffffff", "text2": "#bdbdbd", "text3": "#929292",
     "control": "#2f2f2f", "control_hover": "#353535", "control_pressed": "#2a2a2a",
     "control_border": "#3d3d3d", "control_border_bottom": "#353535",
     "strong_border": "#9c9c9c",

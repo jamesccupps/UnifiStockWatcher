@@ -10,6 +10,7 @@ import json
 import time
 import atexit
 import logging
+import tempfile
 import threading
 import subprocess
 from pathlib import Path
@@ -23,7 +24,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 
 APP_NAME = "UniFi Stock Watcher"
 APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
@@ -150,6 +151,14 @@ def setup_logging(level=logging.INFO, console=False):
                                           "%H:%M:%S"))
         root.addHandler(sh)
 
+    # The windowed build has no console: an uncaught error on a thread
+    # would otherwise leave no trace at all.
+    def thread_failed(args):
+        if args.exc_type is not SystemExit:
+            log.error("Thread %s failed", getattr(args.thread, "name", "?"),
+                      exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    threading.excepthook = thread_failed
+
 # ── Store constants ──────────────────────────────────────────────────────────
 
 STORE_REGIONS = {
@@ -204,7 +213,7 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,199}$", re.IGNORECASE)
 
 
 def is_valid_slug(slug):
-    return isinstance(slug, str) and bool(_SLUG_RE.match(slug)) and ".." not in slug
+    return isinstance(slug, str) and bool(_SLUG_RE.fullmatch(slug)) and ".." not in slug
 
 
 def store_home(region="us"):
@@ -271,7 +280,7 @@ def _valid_setting(key, value):
     if key == "theme":
         return value in THEMES
     if key == "accent":
-        return value == "" or (isinstance(value, str) and bool(_HEX_RE.match(value)))
+        return value == "" or (isinstance(value, str) and bool(_HEX_RE.fullmatch(value)))
     if key == "font_size":
         return value in FONT_SIZES
     if key == "phone_service":
@@ -312,23 +321,34 @@ def read_json(path, default):
         return default
 
 
-def write_json(path, data):
+def write_json(path, data, indent=2):
     """Write JSON atomically, so an interrupted write cannot truncate the file.
 
     write_text() opens with O_TRUNC: a crash, a full disk, or the machine
     sleeping mid-write leaves an empty or half-written watch list. Write to a
-    sibling temp file and rename - os.replace is atomic on NTFS and POSIX.
+    sibling temp file and rename - os.replace is atomic on NTFS and POSIX. The
+    temp file's name is unique, so two writers (the app and the CLI) never
+    share one; the rename is retried for a moment, as antivirus and OneDrive
+    briefly hold files they've just seen change.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    payload = json.dumps(data, indent=2, ensure_ascii=False)
+    payload = json.dumps(data, indent=indent, ensure_ascii=False)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(tmp)
     try:
-        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+        with open(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(payload)
             fh.flush()
             os.fsync(fh.fileno())
-        os.replace(tmp, path)
+        for attempt in range(10):
+            try:
+                os.replace(tmp, path)
+                break
+            except PermissionError:
+                if attempt == 9:
+                    raise
+                time.sleep(0.1)
     except OSError:
         tmp.unlink(missing_ok=True)
         raise
@@ -580,6 +600,11 @@ def refresh_category_coverage(build_id, region="us", force=False):
     return adopted
 
 
+def _objects(value):
+    """The dicts in a list from the store's data, or none."""
+    return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
+
+
 def _fetch_category(build_id, region, cat):
     """Fetch one category page. Returns {slug: product}.
 
@@ -607,7 +632,10 @@ def _fetch_category(build_id, region, cat):
                 path = urlsplit(loc).path.removesuffix(".json")
                 continue
             r.raise_for_status()
-            page_props = r.json().get("pageProps", {})
+            data = r.json()
+            page_props = data.get("pageProps") if isinstance(data, dict) else None
+            if not isinstance(page_props, dict):
+                raise StoreError(f"{cat}: the page has no product data")
         except requests.exceptions.HTTPError as e:
             status = e.response.status_code if e.response is not None else None
             if status == 404 and not refreshed:
@@ -630,16 +658,16 @@ def _fetch_category(build_id, region, cat):
                         cat, path)
             continue
 
-        for subcat in page_props.get("subCategories", []):
-            for p in subcat.get("products", []):
-                if p.get("slug"):
+        for subcat in _objects(page_props.get("subCategories")):
+            for p in _objects(subcat.get("products")):
+                if isinstance(p.get("slug"), str) and p["slug"]:
                     p["_category"] = cat
                     found[p["slug"]] = p
         # Belt-and-suspenders: a flat products list, in case UI ever switches a
         # category page to that shape. setdefault so the richer subCategory
         # entry wins if both exist.
-        for p in page_props.get("products", []):
-            if p.get("slug"):
+        for p in _objects(page_props.get("products")):
+            if isinstance(p.get("slug"), str) and p["slug"]:
                 p.setdefault("_category", cat)
                 found.setdefault(p["slug"], p)
         return found
@@ -652,7 +680,9 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
 
     progress_cb(int_0_to_100) is called as categories complete.
     error_cb(category_slug, exception) reports per-category failures so callers
-    can surface them rather than losing them to stdout.
+    can surface them rather than losing them to stdout. When every category
+    fails, it raises StoreError: an empty catalog read as "no products" and
+    made every watched product fall back to its own page.
 
     The nine category pages are independent, so they are fetched concurrently.
     Sequentially, with a 0.3s pause between each, a cycle spent most of its time
@@ -660,6 +690,7 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
     """
     products = {}
     done = 0
+    failures = []
     with ThreadPoolExecutor(max_workers=CATEGORY_WORKERS,
                             thread_name_prefix="unifi-cat") as pool:
         cats = effective_categories(region)
@@ -671,6 +702,7 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
                 products.update(fut.result())
             except Exception as e:
                 log.warning("Category fetch failed: %s — %s", cat, e)
+                failures.append(e)
                 if error_cb:
                     try:
                         error_cb(cat, e)
@@ -683,32 +715,49 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
                 except Exception:
                     log.exception("progress_cb raised")
 
+    if cats and len(failures) == len(cats):
+        raise StoreError(f"no category could be read ({failures[0]})") from failures[0]
     log.info("Fetched %d unique products across %d categories",
              len(products), len(cats))
     return list(products.values())
 
 
+def _variants(product):
+    """A product's variants that are objects. The store's data is read as it
+    comes: "variants": null or a stray string in the list once failed the
+    whole cycle, every watched product with it."""
+    variants = product.get("variants") if isinstance(product, dict) else None
+    return [v for v in variants if isinstance(v, dict)] if isinstance(variants, list) else []
+
+
 def is_available(product):
-    return any(v.get("status") == "Available" for v in product.get("variants", []))
+    return any(v.get("status") == "Available" for v in _variants(product))
+
+
+def _is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _format_price(price_val):
-    """Format a price value which may be a Money dict, number, or string."""
+    """Format a price value which may be a Money dict, number, or string;
+    None for anything else, such as an amount that isn't a number."""
     if isinstance(price_val, str):
-        return price_val
+        return price_val.strip()[:40] or None
     if isinstance(price_val, dict):
         amount   = price_val.get("amount", 0)
         currency = price_val.get("currency", "USD")
+        if not _is_number(amount) or not isinstance(currency, str):
+            return None
         symbols  = {"USD": "$", "EUR": "€", "GBP": "£", "CAD": "C$",
                      "AUD": "A$", "SEK": "", "NOK": "", "DKK": ""}
         sym = symbols.get(currency, "")
         formatted = f"{amount / 100:,.2f}"
         if sym:
             return f"{sym}{formatted}"
-        return f"{formatted} {currency}"
-    if isinstance(price_val, (int, float)):
+        return f"{formatted} {currency[:8]}"
+    if _is_number(price_val):
         return f"${price_val:,.2f}"
-    return str(price_val)
+    return None
 
 
 def _is_unpriced(price_val):
@@ -744,10 +793,12 @@ def get_price(product):
     displayPrice can be a Money dict like {'amount': 39900, 'currency': 'USD'}
     or a plain number or string.
     """
-    for v in product.get("variants", []):
+    for v in _variants(product):
         price = v.get("displayPrice") or v.get("price")
         if price is not None and not _is_unpriced(price):
-            return _format_price(price)
+            text = _format_price(price)
+            if text:
+                return text
     return None
 
 
@@ -757,7 +808,7 @@ def is_coming_soon(product):
     Distinct from sold out: a ComingSoon item has never been on sale, so
     "back ~" and "sold out for" would both be wrong.
     """
-    statuses = {v.get("status") for v in product.get("variants", [])}
+    statuses = {v.get("status") for v in _variants(product)}
     return bool(statuses) and "Available" not in statuses and "ComingSoon" in statuses
 
 
@@ -772,6 +823,8 @@ def _parse_ts(value):
     """Parse an ISO timestamp or date, returning an aware datetime or None.
 
     Python 3.10's fromisoformat rejects a trailing Z, and CI covers 3.10.
+    A bare date ("2026-10-01") is that calendar day wherever you are, so it
+    becomes noon UTC: any time zone's local date is then the same day.
     """
     if not isinstance(value, str) or not value:
         return None
@@ -779,19 +832,25 @@ def _parse_ts(value):
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError:
         return None
+    if "T" not in value and " " not in value.strip():
+        return dt.replace(hour=12, tzinfo=timezone.utc)
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def _local_now():
+    return datetime.now().astimezone()
 
 
 def get_restock_eta(product):
     """Earliest restock estimate across variants, as a datetime, or None."""
-    etas = [_parse_ts(v.get("restockEtaAt")) for v in product.get("variants", [])]
+    etas = [_parse_ts(v.get("restockEtaAt")) for v in _variants(product)]
     etas = [d for d in etas if d]
     return min(etas) if etas else None
 
 
 def get_sold_out_at(product):
     """Most recent sell-out timestamp across variants, as a datetime, or None."""
-    vals = [_parse_ts(v.get("soldOutAt")) for v in product.get("variants", [])]
+    vals = [_parse_ts(v.get("soldOutAt")) for v in _variants(product)]
     vals = [d for d in vals if d]
     return max(vals) if vals else None
 
@@ -808,7 +867,10 @@ def describe_restock(product, now=None):
     eta = get_restock_eta(product)
     if eta is None:
         return None
-    now = now or datetime.now(timezone.utc)
+    # Calendar days where you are: in UTC, an evening in the Americas is
+    # already tomorrow, and "back ~tomorrow" would mean the day after.
+    now = now or _local_now()
+    eta = eta.astimezone(now.tzinfo)
     days = (eta.date() - now.date()).days
     if days < 0:
         return "restock date passed"
@@ -826,7 +888,8 @@ def describe_sold_out_for(product, now=None):
     since = get_sold_out_at(product)
     if since is None:
         return None
-    now = now or datetime.now(timezone.utc)
+    now = now or _local_now()
+    since = since.astimezone(now.tzinfo)
     # Calendar days, not elapsed 24-hour periods: something that sold out on
     # the 6th reads as "13 days" on the 19th, which is how people count, and
     # it matches describe_restock.
@@ -994,6 +1057,7 @@ def save_watched(items):
 
 MAX_HISTORY_EVENTS = 5000
 HISTORY_VERSION = 2
+COUNTS_SAVE_EVERY = 600             # seconds
 
 
 def _empty_history():
@@ -1017,6 +1081,9 @@ class StockHistory:
     out of it. Checks are counted, not logged.
 
     Writes are deferred and batched; flush() runs on a timer and at shutdown.
+    A check that changes nothing only bumps a counter, which is saved every
+    COUNTS_SAVE_EVERY seconds and at shutdown: saving it with each check
+    rewrote the whole file (about a megabyte, full) every cycle.
     """
 
     def __init__(self, path=None, autosave_after=25):
@@ -1037,7 +1104,9 @@ class StockHistory:
                 if isinstance(e.get("price"), str) and e["price"]:
                     self._price[e["slug"]] = e["price"]
             self._dirty = False
+            self._counts_dirty = False
             self._unsaved = 0
+            self._saved_at = time.monotonic()
 
     def _load(self):
         data = read_json(self._path, None)
@@ -1064,12 +1133,29 @@ class StockHistory:
                 merged["stats"][key] = stats[key]
         return merged
 
+    def _trim_locked(self):
+        """Down to MAX_HISTORY_EVENTS, oldest store-wide changes first: they
+        are most of the events, and the watched products' history is what
+        the History tab is for."""
+        events = self._data["events"]
+        excess = len(events) - MAX_HISTORY_EVENTS
+        if excess <= 0:
+            return
+        drop = set()
+        for i, e in enumerate(events):
+            if len(drop) == excess:
+                break
+            if not e.get("watched"):
+                drop.add(i)
+        kept = [e for i, e in enumerate(events) if i not in drop]
+        self._data["events"] = kept[-MAX_HISTORY_EVENTS:]
+
     def _save_locked(self):
-        if len(self._data["events"]) > MAX_HISTORY_EVENTS:
-            self._data["events"] = self._data["events"][-MAX_HISTORY_EVENTS:]
-        write_json(self._path, self._data)
-        self._dirty = False
+        self._trim_locked()
+        write_json(self._path, self._data, indent=None)
+        self._dirty = self._counts_dirty = False
         self._unsaved = 0
+        self._saved_at = time.monotonic()
 
     def _touch_locked(self):
         self._dirty = True
@@ -1077,11 +1163,20 @@ class StockHistory:
         if self._unsaved >= self._autosave_after:
             self._save_locked()
 
-    def flush(self):
-        """Persist pending changes. Safe to call when nothing has changed."""
+    def flush(self, final=False):
+        """Persist pending changes: new events, and the counters every few
+        minutes (or now, when `final`). Safe to call when nothing has
+        changed."""
         with self._lock:
-            if self._dirty:
+            counts_due = self._counts_dirty and (
+                final or time.monotonic() - self._saved_at >= COUNTS_SAVE_EVERY)
+            if self._dirty or counts_due:
                 self._save_locked()
+
+    def last_state(self, slug):
+        """The last stock state recorded for a product (True, False), or None."""
+        with self._lock:
+            return self._last.get(slug)
 
     def record(self, slug, title, in_stock, price=None, watched=True):
         """Record a product's state; logged only when it differs from the
@@ -1100,7 +1195,7 @@ class StockHistory:
                             and _same_currency(price, was))
             if self._last.get(slug) == in_stock and not repriced:
                 if watched:
-                    self._touch_locked()
+                    self._counts_dirty = True
                 return None
             # Only a watched product's first state is a sighting; any other
             # product is recorded only when it changes.
@@ -1161,7 +1256,7 @@ class StockHistory:
 # Global instance. Deferred writes mean pending events must be flushed on the
 # way out, including on Ctrl+C or a closed GUI window.
 stock_history = StockHistory()
-atexit.register(stock_history.flush)
+atexit.register(stock_history.flush, True)
 
 
 # ── Notification ─────────────────────────────────────────────────────────────
@@ -1208,10 +1303,13 @@ $balloon.Dispose()
     env["UNIFI_NOTIFY_TITLE"] = str(title)[:63]
     env["UNIFI_NOTIFY_TEXT"]  = str(message)[:255]
 
+    # Windows' own copy, not whatever "powershell" a PATH entry offers first.
+    root = os.environ.get("SystemRoot", r"C:\Windows")
+    powershell = Path(root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
     try:
         subprocess.Popen(
-            ["powershell", "-NoProfile", "-NonInteractive",
-             "-WindowStyle", "Hidden", "-Command", ps_script],
+            [str(powershell) if powershell.is_file() else "powershell", "-NoProfile",
+             "-NonInteractive", "-WindowStyle", "Hidden", "-Command", ps_script],
             env=env,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

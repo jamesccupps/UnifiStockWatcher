@@ -77,7 +77,14 @@ def app(_session_app, isolated_files, monkeypatch):
     a.status = {}
     a.notified = {}
     a._prev_status = {}
-    a._delisted = set()
+    a._delisted = {}
+    a._store_gen = 0
+    a._store_down = None
+    a._failures = 0
+    a._partial = None
+    a._bad_products = set()
+    a._start_pending = False
+    a._toasts = []
     a._closed = False
     a.watcher_thread = None
     a.available_update = None
@@ -276,7 +283,7 @@ def test_workers_never_call_tk(app, monkeypatch):
 
 def test_closing_without_a_tray_quits_and_flushes(app, monkeypatch):
     flushed, destroyed = [], []
-    monkeypatch.setattr(gui.stock_history, "flush", lambda: flushed.append(1))
+    monkeypatch.setattr(gui.stock_history, "flush", lambda final=False: flushed.append(final))
     # The app is shared across this module, so record the teardown rather than
     # actually destroying the interpreter out from under the other tests.
     monkeypatch.setattr(type(app), "destroy", lambda self: destroyed.append(1))
@@ -285,7 +292,7 @@ def test_closing_without_a_tray_quits_and_flushes(app, monkeypatch):
     app._on_close()
     assert app.watching is False
     assert app._wake.is_set()
-    assert flushed == [1]
+    assert flushed == [True]                     # the counters too, on the way out
     assert destroyed == [1]
 
 
@@ -604,6 +611,354 @@ def test_a_delisted_item_is_checked_once(app, monkeypatch):
 
     assert calls == [1]
     assert app.rows["gone"].pill.cget("text") == "DELISTED"
+
+
+def _gone(*a, **k):
+    raise unifi_core.ProductNotFound("gone")
+
+
+def test_a_delisted_product_back_in_the_catalog_is_watched_again(app, monkeypatch):
+    """Regression: one 404 skipped it for the rest of the session, even once
+    it was back in the catalog: the restock you were waiting for."""
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    monkeypatch.setattr(gui, "check_slug", _gone)
+    app.watched = items("s")
+    app._refresh_list()
+    app._cycle()
+    pump(app, 0.2)
+    assert "s" in app._delisted and app.rows["s"].pill.cget("text") == "DELISTED"
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [product("s")])
+    app._cycle()
+    pump(app, 0.2)
+    assert "s" not in app._delisted
+    assert app.rows["s"].pill.cget("text") == "IN STOCK" and len(notes) == 1
+    assert any(m == "S is back on the store." for _, m, _ in app._log_lines)
+
+
+def test_a_delisted_product_is_asked_again_later(app, monkeypatch):
+    calls = []
+    monkeypatch.setattr(gui, "check_slug", lambda *a, **k: calls.append(1) or _gone())
+    app.watched = items("s")
+    app._cycle()
+    app._cycle()
+    assert calls == [1]
+    app._delisted["s"] -= gui.DELISTED_RECHECK + 1
+    app._cycle()
+    assert calls == [1, 1]
+
+
+def test_removing_and_adding_a_delisted_product_looks_it_up_again(app, monkeypatch):
+    monkeypatch.setattr(gui, "check_slug", _gone)
+    app.watched = items("s")
+    app._refresh_list()
+    app._cycle()
+    app._remove_item(app.watched[0])
+    assert "s" not in app._delisted
+    app._delisted["s"] = time.monotonic()
+    app._add_items(items("s"))
+    assert "s" not in app._delisted
+
+
+# ── launching, outages, odd data ─────────────────────────────────────────────
+
+def test_a_launch_doesnt_alert_again_for_what_was_already_in_stock(app, monkeypatch):
+    """Regression: notified started empty, so every launch (Start with
+    Windows, the restart after an update) alerted for everything in stock."""
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    gui.stock_history.record("was-in", "Was In", True)
+    gui.stock_history.record("came-back", "Came Back", False)
+    app.watched = items("was-in", "came-back", "new")
+    app._seed_notified()
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [
+        product("was-in"), product("came-back"), product("new")])
+    app._cycle()
+    pump(app, 0.2)
+    assert sorted(n[0] for n in notes) == ["Back in stock: Came-Back", "Back in stock: New"]
+
+
+def test_an_outage_is_said_once_and_backs_off(app, monkeypatch):
+    """Regression: no category answering read as an empty store, and every
+    watched product was then asked for on its own page, every cycle."""
+    asked = []
+    monkeypatch.setattr(gui, "check_slug", lambda *a, **k: asked.append(1) or (False, None))
+
+    def down(*a, **k):
+        raise unifi_core.StoreError("no category could be read (HTTP 503)")
+    monkeypatch.setattr(gui, "fetch_all_products", down)
+    app.watched = items("a", "b")
+    assert app._cycle() is False
+    assert app._cycle() is False
+    pump(app, 0.2)
+    assert asked == [] and app._failures == 2
+    assert sum("Couldn't reach the store" in m for _, m, _ in app._log_lines) == 1
+    assert app._status_text[0] == "Can't reach the store"
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [product("a"), product("b")])
+    assert app._cycle() is True
+    pump(app, 0.2)
+    assert app._failures == 0
+    assert any(m.startswith("The store is answering again") for _, m, _ in app._log_lines)
+
+
+def test_the_wait_doubles_while_the_store_is_out(app, monkeypatch):
+    waits = []
+    app.settings["poll_interval"] = 60
+
+    def failing_cycle(while_watching=False):
+        app._failures += 1
+        return False
+
+    def wait(interval):
+        waits.append(interval)
+        if len(waits) == 7:
+            app.watching = False
+    monkeypatch.setattr(app, "_cycle", failing_cycle)
+    monkeypatch.setattr(app, "_wait_for_next_cycle", wait)
+    app.watching = True
+    app._watch_loop()
+    assert waits == [120, 240, 480, 960, 1800, 1800, 1800]
+
+
+def test_a_refusing_store_isnt_asked_product_by_product(app, monkeypatch):
+    """A 429 on some categories: the rest is checked, the missing products
+    keep their last state, and none is looked up on its own page."""
+    asked = []
+    monkeypatch.setattr(gui, "check_slug", lambda *a, **k: asked.append(1) or (False, None))
+    app._prev_status = {"b": (False, "B", None, None)}
+
+    def partial(build_id, region, error_cb=None, **k):
+        error_cb("category/all-wifi", _http_error(429))
+        return [product("a")]
+    monkeypatch.setattr(gui, "fetch_all_products", partial)
+    app.watched = items("a", "b")
+    assert app._cycle() is False
+    pump(app, 0.2)
+    assert asked == []
+    assert set(app._prev_status) == {"a", "b"}            # b kept, for the next diff
+    assert app.status["a"][0] is True
+
+
+def _http_error(code):
+    err = unifi_core.requests.exceptions.HTTPError(f"{code} error")
+    err.response = FakeResponse(code)
+    return err
+
+
+def test_one_failing_category_is_said_once_and_the_rest_is_checked(app, monkeypatch):
+    def partial(build_id, region, error_cb=None, **k):
+        error_cb("category/all-wifi", _http_error(500))
+        return [product("a")]
+    monkeypatch.setattr(gui, "fetch_all_products", partial)
+    app.watched = items("a")
+    assert app._cycle() is True and app._cycle() is True
+    pump(app, 0.2)
+    assert sum("Couldn't read 1 of the store's categories" in m
+               for _, m, _ in app._log_lines) == 1
+    assert app.status["a"][0] is True
+
+
+def test_one_odd_product_doesnt_stop_the_check(app, monkeypatch):
+    """Regression: a product the app couldn't read failed the whole cycle."""
+    odd = product("odd")
+    odd["title"] = {"not": "text"}
+    monkeypatch.setattr(gui, "restock_note", lambda p: 1 / 0 if p["slug"] == "odd" else None)
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [
+        odd, {"slug": "null", "variants": None}, product("good")])
+    app.watched = items("good")
+    assert app._cycle() is True
+    pump(app, 0.2)
+    assert app.status["good"][0] is True
+    assert "odd" in app._bad_products
+
+
+def test_changing_the_store_during_a_check_drops_what_it_found(app, monkeypatch):
+    """Regression: the cycle stored the old store's catalog as the new one's
+    baseline, and alerted "available on the Europe store" from it."""
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+
+    def catalog_then_switch(*a, **k):
+        app._store_gen += 1                        # what _on_region_changed does
+        return [product("s")]
+    monkeypatch.setattr(gui, "fetch_all_products", catalog_then_switch)
+    app.watched = items("s")
+    app._cycle()
+    pump(app, 0.2)
+    assert notes == [] and app._prev_status == {} and "s" not in app.status
+
+
+# ── stop and start ───────────────────────────────────────────────────────────
+
+def test_stopping_ends_the_check_at_the_next_product(app, monkeypatch):
+    """Regression: Stop let the cycle run to its end, minutes in an outage."""
+    asked = []
+
+    def slow(*a, **k):
+        asked.append(1)
+        app.watching = False                       # Stop clicked meanwhile
+        return False, None
+    monkeypatch.setattr(gui, "check_slug", slow)
+    app.watched = items("a", "b", "c")
+    app.watching = True
+    app._cycle(while_watching=True)
+    assert asked == [1]
+
+
+def test_start_while_the_last_check_finishes_starts_after_it(app, monkeypatch):
+    """Regression: the click was silently ignored."""
+    class Finishing:
+        alive = True
+
+        def is_alive(self):
+            return self.alive
+    old = Finishing()
+    app.watched = items("a")
+    app.watcher_thread = old
+    app._toggle_watch()
+    assert app.watching is False and app._status_text[0] == "Finishing the last check…"
+    old.alive = False
+    assert pump_until(app, lambda: app.watching, 3)
+    _quiesce(app)
+
+
+def test_check_now_while_a_check_runs_says_so(app):
+    class Running:
+        def is_alive(self):
+            return True
+    app.watcher_thread = Running()
+    app._force_check()
+    assert any(m == "A check is already running." for _, m, _ in app._log_lines)
+    app.watcher_thread = None
+
+
+# ── notifications and errors ─────────────────────────────────────────────────
+
+def test_notifications_close_together_become_one(app, monkeypatch):
+    """Windows doesn't say which notification was clicked: with two up, a
+    click on the first opened the second one's product."""
+    shown = []
+
+    class FakeTray:
+        def notify(self, title, text, on_click=None):
+            shown.append((title, text, on_click))
+
+        def set_state(self, *a):
+            pass
+    app.tray = FakeTray()
+    opened = []
+    monkeypatch.setattr(gui.webbrowser, "open", opened.append)
+    monkeypatch.setattr(app, "show_window", lambda: opened.append("window"))
+    try:
+        app._notify("Back in stock: A", "a", "https://a")
+        app._notify("Back in stock: B", "b", "https://b")
+        assert shown[0][0] == "Back in stock: A"
+        assert shown[1][0] == "2 alerts from UniFi Stock Watcher"
+        assert shown[1][1] == "Back in stock: A; Back in stock: B"
+        shown[1][2]()
+        pump(app, 0.1)
+        assert opened == ["window"]
+        app._toasts = [(t - gui.TOAST_MERGE - 1, title) for t, title in app._toasts]
+        app._notify("Back in stock: C", "c", "https://c")
+        shown[2][2]()
+        assert shown[2][0] == "Back in stock: C" and opened[-1] == "https://c"
+    finally:
+        app.tray = None
+
+
+def test_an_error_in_a_callback_is_logged_and_shown(app, monkeypatch, caplog):
+    """Regression: the frozen app has no console, so it vanished."""
+    boxes = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: boxes.append(a))
+    app._error_shown_at = -60
+    with caplog.at_level(logging.ERROR, logger="unifi_watcher"):
+        try:
+            raise PermissionError("the file is open in Excel")
+        except PermissionError as e:
+            app.report_callback_exception(type(e), e, e.__traceback__)
+            app.report_callback_exception(type(e), e, e.__traceback__)
+    assert len(boxes) == 1 and "open in Excel" in boxes[0][1]
+    assert sum("A UI callback failed" in r.message for r in caplog.records) == 2
+
+
+def test_exports_to_a_locked_file_say_so(app, monkeypatch, tmp_path):
+    boxes = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: boxes.append(a))
+    target = tmp_path / "locked"
+    target.mkdir()                                   # can't be opened for writing
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **k: str(target))
+    app._show_tab("history")
+    app._history_widget._export()
+    app._show_tab("settings")
+    app._settings_widget._export()
+    assert [b[0] for b in boxes] == ["Couldn't export", "Couldn't export"]
+
+
+def test_the_history_csv_opens_in_excel_with_its_symbols(app, monkeypatch, tmp_path):
+    gui.stock_history.record("a", "A", True, "£279.00")
+    out = tmp_path / "h.csv"
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **k: str(out))
+    app._show_tab("history")
+    app._history_widget.refresh()
+    app._history_widget._export()
+    data = out.read_bytes()
+    assert data.startswith(b"\xef\xbb\xbf") and "£279.00".encode() in data
+
+
+def test_only_a_successful_update_cleans_up(monkeypatch):
+    """Regression: after a failed one, the cleanup deleted _internal.old, by
+    then the only good copy of the program."""
+    cleaned = []
+    monkeypatch.setattr(gui.updater, "cleanup_after_update", lambda: cleaned.append(1))
+    monkeypatch.setattr(gui, "save_settings", lambda s: None)
+    assert gui._after_update(["--update-failed"], {"resume_watching": True}) is True
+    assert cleaned == []
+    assert gui._after_update(["--updated"], {}) is False
+    assert cleaned == [1]
+    assert gui._after_update([], {"resume_watching": True}) is False
+
+
+# ── scrolling and sizes ──────────────────────────────────────────────────────
+
+def test_touchpad_scrolling_adds_up_small_deltas(monkeypatch):
+    """Regression: floor division made a small scroll up nothing and a small
+    scroll down a whole line, every time."""
+    scrolled = []
+
+    class Target:
+        def yview_scroll(self, n, what):
+            scrolled.append(n)
+
+    class Widget:
+        def winfo_containing(self, x, y):
+            return self
+    target = Target()
+    monkeypatch.setattr(gui, "_wheel_target", lambda w: target)
+    monkeypatch.setattr(gui, "_wheel_rest", 0)
+
+    def wheel(delta):
+        gui._dispatch_wheel(type("E", (), {"widget": Widget(), "x_root": 0, "y_root": 0,
+                                           "delta": delta})())
+    for _ in range(4):
+        wheel(30)                                    # four small steps up: one line
+    assert scrolled == [-1]
+    wheel(-30)                                       # a small step down: nothing yet
+    assert scrolled == [-1]
+    for _ in range(3):
+        wheel(-30)
+    assert scrolled == [-1, 1]
+    wheel(-120)
+    wheel(240)
+    assert scrolled == [-1, 1, 1, -2]
+
+
+def test_windows_fit_the_screen(app, monkeypatch):
+    """At 150% the default window was 1,080 px tall, all of a 1080p screen."""
+    monkeypatch.setattr(app, "winfo_screenheight", lambda: 1080)
+    monkeypatch.setattr(app, "winfo_screenwidth", lambda: 1920)
+    monkeypatch.setattr(app, "winfo_fpixels", lambda what: 144.0)
+    assert gui.fit_to_screen(app, 1170, 1080) == (1170, 936)
+    assert gui.fit_to_screen(app, 800, 600) == (800, 600)
 
 
 # ── store-wide changes ───────────────────────────────────────────────────────

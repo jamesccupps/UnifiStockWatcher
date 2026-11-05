@@ -9,6 +9,7 @@ put the secret in it, and reasons go to the log and the activity panel. That
 includes requests' own exception text, which quotes the URL.
 """
 
+import math
 import queue
 import re
 import threading
@@ -106,12 +107,12 @@ def problem(settings):
         parts = _url(settings.get("ntfy_url", ""))
         if not parts:
             return "Enter your topic's address, like https://ntfy.sh/your-topic."
-        if not _NTFY_TOPIC.match(parts.path.rstrip("/").rpartition("/")[2]):
+        if not _NTFY_TOPIC.fullmatch(parts.path.rstrip("/").rpartition("/")[2]):
             return "The address should end in the topic's name (letters, digits, - and _)."
     elif service == "pushover":
-        if not _PUSHOVER_KEY.match(settings.get("pushover_user", "")):
+        if not _PUSHOVER_KEY.fullmatch(settings.get("pushover_user", "")):
             return "Enter your Pushover user key (30 letters and digits)."
-        if not _PUSHOVER_KEY.match(settings.get("pushover_token", "")):
+        if not _PUSHOVER_KEY.fullmatch(settings.get("pushover_token", "")):
             return "Enter the API token of an application you made on pushover.net."
     elif service == "discord":
         parts = _url(settings.get("discord_url", ""))
@@ -240,6 +241,8 @@ def _retry_after(resp):
         wait = float(resp.headers.get("Retry-After", 0))
     except (TypeError, ValueError):
         wait = 0
+    if not math.isfinite(wait):         # "nan" parses, and time.sleep(nan) raises
+        wait = MAX_RETRY_AFTER if wait > 0 else 0
     return min(max(wait, 0), MAX_RETRY_AFTER)
 
 
