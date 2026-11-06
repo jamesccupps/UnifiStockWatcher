@@ -43,8 +43,12 @@ try {
     }
 
     # Into a folder of its own, so the runner's preinstalled copy (if any) is never what runs.
+    # /PORTABLE=1 (Inno Setup's own installer): no uninstaller or registry entry, and no reuse of
+    # a previous installation's folder. ISCC.exe has no version resource to check afterwards; the
+    # installer's SHA-256 is what pins the version.
     $p = Start-Process $setup -Wait -PassThru -ArgumentList @(
-        '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', "/DIR=`"$dir`"", "/LOG=`"$log`"")
+        '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', '/NOICONS', '/PORTABLE=1',
+        "/DIR=`"$dir`"", "/LOG=`"$log`"")
     if ($p.ExitCode -ne 0) { Fail "Inno Setup's installer exited with $($p.ExitCode)" }
 
     $iscc = Join-Path $dir 'ISCC.exe'
@@ -52,10 +56,7 @@ try {
         $found = (Get-ChildItem $dir -ErrorAction SilentlyContinue | Select-Object -First 15 -ExpandProperty Name) -join ', '
         Fail "no ISCC.exe in $dir (it holds: $found)"
     }
-    $info = (Get-Item $iscc).VersionInfo
-    $have = '{0}.{1}.{2}' -f $info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart
-    if ($have -ne $Version) { Fail "$iscc is version $have (file version '$($info.FileVersion)'), expected $Version" }
-    Write-Host "Inno Setup $have at $iscc"
+    Write-Host "Inno Setup $Version at $iscc"
     if ($env:GITHUB_ENV) { "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8 }
 } catch {
     if (-not $script:reported) { Fail "$_" }
