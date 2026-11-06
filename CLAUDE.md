@@ -203,9 +203,9 @@ back a version, so a bad release is fixed by publishing a higher one.
 
 **The signing key** (Ed25519):
 - Private key: `%USERPROFILE%\.unifi-stock-watcher\update-signing-key.pem` on the development PC, and the same
-  text in the secret `UPDATE_SIGNING_KEY`, meant to live in the `release` environment (Settings → Environments,
-  deployments limited to tags `v*.*.*`) rather than as a repository secret, so only a tag's signing job can read
-  it. Never commit it; back it up offline. Without it, installed copies can't update in place (they'd need one
+  text in the environment secret `UPDATE_SIGNING_KEY` of the `release` environment (Settings → Environments;
+  deployments limited to tags `v*.*.*`; no repository secret of that name, since 2026-11-06), so only a tag's
+  signing job can read it. Never commit it; back it up offline. Without it, installed copies can't update in place (they'd need one
   manual install of a build with a new `update_key.py`).
 - `scripts/make_signing_key.py` made it and refuses to replace it. A local `build_windows.py` signs with the
   file, so a release can be built by hand if CI is down: attach the same four files.
