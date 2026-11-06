@@ -5,8 +5,6 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **One copy at a time, CLI included.** The CLI takes no single-instance lock (the installer and the updater
-  wait only for the app's), and a second app window started while the first is still loading runs too.
 - **winget and SourceForge.** `JamesCupps.UnifiStockWatcher` 3.2.0 is submitted to winget-pkgs
   ([microsoft/winget-pkgs#470772](https://github.com/microsoft/winget-pkgs/pull/470772)), waiting for review; the
   SourceForge mirror is still to set up (both described in CLAUDE.md).

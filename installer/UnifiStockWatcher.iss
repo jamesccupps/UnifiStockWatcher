@@ -9,8 +9,8 @@
 ; and are never touched by installing, updating or uninstalling.
 ;
 ; The in-app updater runs this silently with /relaunch=1: it waits for the
-; running copy to exit (the app's single-instance mutex) and then starts the
-; new one. The app tells an installed copy from a portable one by the
+; running copy to exit (the single-instance mutex, which the app and the
+; command-line watcher hold) and then starts the new one. The app tells an installed copy from a portable one by the
 ; uninstaller beside it, unins000.exe.
 ;
 ; AppId must never change: it is how Windows (and this installer) recognise an
@@ -88,6 +88,14 @@ begin
   Result := ExpandConstant('{param:relaunch|0}') = '1';
 end;
 
+{ The app and the command-line watcher (3.2.2 on) both hold the mutex. }
+function RunningMessage: String;
+begin
+  Result := '{#AppName} is running. Quit it first: right-click its icon in the ' +
+            'notification area and choose Quit, or for the command-line watcher, ' +
+            'press Ctrl+C in its window. Then click Retry.';
+end;
+
 { The in-app updater starts Setup and then quits, so a silent run waits a
   little for it to go. Run by hand while the app is open, Setup asks. }
 function AppIsGone: Boolean;
@@ -113,9 +121,7 @@ begin
   end;
   while CheckForMutexes('{#AppMutex}') do
   begin
-    if MsgBox('{#AppName} is running. Quit it first: right-click its icon in the ' +
-              'notification area and choose Quit. Then click Retry.',
-              mbError, MB_RETRYCANCEL) = IDCANCEL then
+    if MsgBox(RunningMessage, mbError, MB_RETRYCANCEL) = IDCANCEL then
     begin
       Result := False;
       exit;
@@ -133,9 +139,7 @@ begin
       Result := AppIsGone;
       exit;
     end;
-    if MsgBox('{#AppName} is running. Quit it first: right-click its icon in the ' +
-              'notification area and choose Quit. Then click Retry.',
-              mbError, MB_RETRYCANCEL) = IDCANCEL then
+    if MsgBox(RunningMessage, mbError, MB_RETRYCANCEL) = IDCANCEL then
     begin
       Result := False;
       exit;

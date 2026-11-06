@@ -6,6 +6,7 @@ the GUI runs (and its tests run) on Linux too.
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 log = logging.getLogger("unifi_watcher.win")
@@ -20,8 +21,11 @@ if IS_WINDOWS:
 RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = "UniFi Stock Watcher"
 MUTEX_NAME = "JamesCupps.UnifiStockWatcher"    # Inno Setup waits on this too
+CLI_MUTEX_NAME = MUTEX_NAME + ".CLI"           # also held by the command-line watcher
 TRAY_CLASS = "UnifiStockWatcherTray"
 WM_SHOW_WINDOW = 0x8000 + 0x42                 # WM_APP + 0x42, see tray.py
+ERROR_ALREADY_EXISTS = 183
+SYNCHRONIZE = 0x00100000
 
 
 def enable_dpi_awareness():
@@ -220,35 +224,93 @@ def refresh_autostart():
 
 # ── Single instance ──────────────────────────────────────────────────────────
 
-class SingleInstance:
-    """A named mutex held for the life of the process.
+def _mutex_exists(name):
+    """Whether some process holds a mutex of this name."""
+    if not IS_WINDOWS:
+        return False
+    k32 = ctypes.windll.kernel32
+    k32.OpenMutexW.restype = wintypes.HANDLE
+    h = k32.OpenMutexW(SYNCHRONIZE, False, name)
+    if not h:
+        return False
+    k32.CloseHandle(h)
+    return True
 
-    `already_running` is True when another copy holds it; that copy is then
-    asked to show its window (its tray window handles WM_SHOW_WINDOW).
+
+def _tray_window():
+    """The running app's tray window (tray.py), or None."""
+    if not IS_WINDOWS:
+        return None
+    u32 = ctypes.windll.user32
+    u32.FindWindowW.restype = wintypes.HWND
+    return u32.FindWindowW(TRAY_CLASS, None) or None
+
+
+class SingleInstance:
+    """One copy at a time, the app and the command-line watcher alike: two
+    would alert twice for every product, and the installer and the updater
+    wait for this lock before they replace the program's files. A named mutex,
+    MUTEX_NAME (Inno Setup waits on it too), held for the life of the process;
+    the CLI also holds CLI_MUTEX_NAME, so a copy that finds the lock taken can
+    say which kind has it.
+
+    `already_running` is True when another copy had it. This copy then holds
+    nothing, and `wait_for_other` says what the other one is.
     """
 
-    def __init__(self, name=MUTEX_NAME):
-        self.handle = None
+    def __init__(self, cli=False):
+        self.cli = cli
+        self.handle = self.marker = None
         self.already_running = False
+        self._acquire()
+
+    def _acquire(self):
         if not IS_WINDOWS:
             return
         k32 = ctypes.windll.kernel32
         k32.CreateMutexW.restype = wintypes.HANDLE
-        self.handle = k32.CreateMutexW(None, False, name)
-        self.already_running = k32.GetLastError() == 183    # ERROR_ALREADY_EXISTS
+        self.handle = k32.CreateMutexW(None, False, MUTEX_NAME)
+        self.already_running = k32.GetLastError() == ERROR_ALREADY_EXISTS
+        if self.already_running:
+            # Keep no handle to it: the mutex then goes when the other copy
+            # does, which is how wait_for_other sees it go.
+            self.release()
+        elif self.cli:
+            self.marker = k32.CreateMutexW(None, False, CLI_MUTEX_NAME)
+
+    def wait_for_other(self, timeout=30, poll=0.1):
+        """What holds the lock, when another copy does: "app" once its tray
+        window is up (a copy that's still starting has the lock a few seconds
+        before its window), "cli" for the command-line watcher, "gone" if it
+        exited and this copy now holds the lock, or None if none of those
+        happened within `timeout` seconds (a copy that's stuck, or that has no
+        tray window)."""
+        deadline = time.monotonic() + timeout
+        while True:
+            if _tray_window():
+                return "app"
+            if _mutex_exists(CLI_MUTEX_NAME):
+                return "cli"
+            if not _mutex_exists(MUTEX_NAME):
+                self._acquire()
+                if not self.already_running:
+                    return "gone"
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(poll)
 
     def signal_existing(self):
-        if not IS_WINDOWS:
-            return False
-        u32 = ctypes.windll.user32
-        u32.FindWindowW.restype = wintypes.HWND
-        hwnd = u32.FindWindowW(TRAY_CLASS, None)
+        """Ask the running app to show its window (its tray window handles
+        WM_SHOW_WINDOW)."""
+        hwnd = _tray_window()
         if hwnd:
-            u32.PostMessageW(hwnd, WM_SHOW_WINDOW, 0, 0)
+            ctypes.windll.user32.PostMessageW(hwnd, WM_SHOW_WINDOW, 0, 0)
             return True
         return False
 
     def release(self):
-        if self.handle:
-            ctypes.windll.kernel32.CloseHandle(self.handle)
-            self.handle = None
+        for attr in ("handle", "marker"):
+            h = getattr(self, attr)
+            if h:
+                ctypes.windll.kernel32.CloseHandle(h)
+                setattr(self, attr, None)

@@ -2548,6 +2548,45 @@ def _after_update(argv, settings):
     return resume
 
 
+OTHER_COPY_WAIT = 30    # seconds for a copy that's still starting to put up its tray window
+
+
+def _say_already_running(kind):
+    """Another copy has the lock and has no window to show instead."""
+    if kind == "cli":
+        text = (f"The command-line watcher is running, and only one copy of {APP_NAME} "
+                "watches at a time. Stop it (Ctrl+C in its window), then start the app again.")
+    else:
+        text = (f"Another copy of {APP_NAME} is running but didn't answer. If it doesn't "
+                "appear, end UnifiStockWatcher.exe in Task Manager, then start the app again.")
+    root = tk.Tk()
+    root.withdraw()
+    try:
+        messagebox.showwarning(APP_NAME, text, parent=root)
+    finally:
+        root.destroy()
+
+
+def _single_instance():
+    """This copy's lock, or the exit code when another copy has it: that copy's
+    window is shown (0), or this one says why it won't start (1). A copy that's
+    still starting holds the lock a few seconds before its tray window is up:
+    it's waited for, rather than a second copy starting beside it."""
+    instance = winplatform.SingleInstance()
+    if not instance.already_running:
+        return instance, None
+    other = instance.wait_for_other(timeout=OTHER_COPY_WAIT)
+    if other == "gone":
+        return instance, None
+    if other == "app" and instance.signal_existing():
+        log.info("Already running: showed that copy's window")
+        return None, 0
+    log.warning("Already running (%s), and not answering: not starting",
+                "the command-line watcher" if other == "cli" else "another copy")
+    _say_already_running(other)
+    return None, 1
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--finish-update" in argv:
@@ -2568,13 +2607,12 @@ def main(argv=None):
 
     setup_logging()
     log.info("%s %s starting (%s)", APP_NAME, __version__, updater.install_kind())
+    # Before anything that writes the data folder (the 2.x migration first).
+    instance, code = _single_instance()
+    if code is not None:
+        return code
     migrate_legacy_files()
 
-    instance = winplatform.SingleInstance()
-    if instance.already_running:
-        if instance.signal_existing():
-            return 0
-        log.warning("Another copy holds the mutex but has no tray window; starting anyway")
     if updater.install_kind() == "installed":
         winplatform.set_app_id(APP_ID)
 

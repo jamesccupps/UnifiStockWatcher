@@ -143,8 +143,14 @@ to an empty folder is the safe way to run a build.
   programs that keep rewriting Run keys). `refresh_autostart` repoints it at the running copy only when the
   program it names no longer exists, and only from `main()`: from the window's constructor, every self-test,
   `demo.py` run and test run took it over. Uninstall removes it.
-- **Single instance**: the named mutex `JamesCupps.UnifiStockWatcher`; a second copy finds the tray window
-  (class `UnifiStockWatcherTray`) and posts `WM_SHOW_WINDOW` to it. Inno Setup waits on the same mutex.
+- **Single instance** (`winplatform.SingleInstance`): one copy at a time, the app and the CLI alike (3.2.2 on), as
+  the named mutex `JamesCupps.UnifiStockWatcher`, which Inno Setup waits on too; the CLI also holds
+  `JamesCupps.UnifiStockWatcher.CLI`, so a refused copy can say which kind is running. A copy that finds the mutex
+  taken keeps no handle to it and `wait_for_other()` polls: the tray window (class `UnifiStockWatcherTray`) →
+  post `WM_SHOW_WINDOW` to it and exit; the CLI's mutex → say so and exit; the mutex gone → take it and start. A
+  copy that's still starting holds the mutex seconds before its tray window exists, so the app waits up to
+  `OTHER_COPY_WAIT` (30 s) for it; 3.2.1 started a second copy then. The CLI waits 5 s; `--test` and
+  `--version` take no lock. Tests use their own mutex names (`tests/test_single_instance.py`).
 - The tray's window class is registered once per process with one module-level window procedure; a
   per-instance ctypes callback would be called after its TrayIcon was collected.
 - **Screenshots and the locked desktop**: on a locked or undisplayed desktop Windows sends no WM_PAINT for

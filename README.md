@@ -175,6 +175,8 @@ UnifiStockWatcher-cli.exe --version  # the version, and where the files are
 ```
 
 It uses the same watch list and settings as the app. Run it from Task Scheduler for a watcher without a window.
+One copy watches at a time, so the watcher and the app don't run together: each says so and exits if the other is
+running (`--test` and `--version` run anyway).
 
 ## Troubleshooting
 
@@ -186,6 +188,7 @@ It uses the same watch list and settings as the app. Run it from Task Scheduler 
 | A product shows **DELISTED** | The store doesn't list it any more (renamed, discontinued, or pulled for a while). It's watched again as soon as it's back in the catalog, and its own page is asked again every 6 hours. If it was renamed, add the new one from the catalog. |
 | Stock looks wrong for one product | [Open an issue](https://github.com/jamesccupps/UnifiStockWatcher/issues/new?template=bug_report.yml) with its store link. A nightly check against the real store catches most changes on Ubiquiti's side the day they ship. |
 | The window is gone | It's in the notification area (click the tray icon). Starting the app again also brings it back. |
+| "The command-line watcher is running" | One copy watches at a time. Stop the watcher (Ctrl+C in its window, or end its Task Scheduler task), then start the app. |
 | "Windows protected your PC" | **More info → Run anyway**. The app isn't code-signed. |
 | The update didn't install | Details are in `update.log` in the data folder. The previous version keeps running; the release page always has the full installer. |
 

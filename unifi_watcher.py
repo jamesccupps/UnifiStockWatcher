@@ -32,6 +32,7 @@ from unifi_core import (
     wants_alert, notify_windows, play_sound, migrate_legacy_files, setup_logging,
 )
 import webhooks
+import winplatform
 
 
 # ── Interactive product picker ────────────────────────────────────────────────
@@ -333,8 +334,17 @@ def main():
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-if __name__ == "__main__":
-    if "--version" in sys.argv or "-V" in sys.argv:
+ALREADY_RUNNING = {
+    "app": f"{APP_NAME} is already running (the app: its icon is in the notification area).\n"
+           "One copy watches at a time: quit the app first (right-click its icon, Quit).",
+    "cli": "Another command-line watcher is already running. One copy watches at a time.",
+    None: f"Another copy of {APP_NAME} is already running (it may still be starting).\n"
+          "One copy watches at a time.",
+}
+
+
+def run(argv):
+    if "--version" in argv or "-V" in argv:
         # Also prints where runtime files live: that answers the common
         # "where are my settings?" question, and it is what the release
         # smoke test checks, since a frozen build that resolves its paths
@@ -342,13 +352,25 @@ if __name__ == "__main__":
         print(f"{APP_NAME} {__version__}")
         print(f"config directory: {BASE_DIR}")
         print(f"portable: {'yes' if is_portable() else 'no'}")
-        sys.exit(0)
+        return 0
     setup_logging(console=True)
+    # One copy at a time, the app included (winplatform.SingleInstance): two
+    # would alert twice, and the installer and the updater wait for this lock
+    # before they replace the program's files. --test watches nothing and
+    # writes nothing, so it runs beside the app.
+    lock = None
+    if "--test" not in argv:
+        lock = winplatform.SingleInstance(cli=True)
+        if lock.already_running:
+            other = lock.wait_for_other(timeout=5)
+            if other != "gone":
+                print(ALREADY_RUNNING[other])
+                return 1
     migrate_legacy_files()
     try:
-        if "--test" in sys.argv:
+        if "--test" in argv:
             test_mode()
-        elif "--setup" in sys.argv:
+        elif "--setup" in argv:
             run_setup()
             print("Starting watcher in 3 seconds…\n")
             time.sleep(3)
@@ -359,3 +381,10 @@ if __name__ == "__main__":
         print("\nStopped.")
     finally:
         stock_history.flush()
+        if lock:
+            lock.release()
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(run(sys.argv[1:]))

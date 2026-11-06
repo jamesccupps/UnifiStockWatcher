@@ -2,7 +2,23 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
-## Unreleased
+## v3.2.2
+
+One copy at a time, the command-line watcher included.
+
+### Fixed
+
+- **The app and the command-line watcher could run together**, and alert twice for every product. The CLI took
+  no lock, so the installer and the updater, which wait for the app's, could also replace the program's files
+  under a running CLI. Both now hold the same mutex (`winplatform.SingleInstance`); the CLI also holds a marker
+  mutex, so whichever starts second says which kind is running and exits: the CLI with code 1, the app with a
+  message, unless the other copy is the app, whose window it shows as before. `--test` and `--version` take no
+  lock. The installer's "is running" message mentions Ctrl+C for the CLI.
+- **A second copy started while the first was still loading ran beside it.** The first holds the mutex a few
+  seconds before its tray window exists, and the second, finding no window, started anyway. It now waits up to
+  30 seconds for the window (or for the first copy to exit, and then starts). A copy that holds the lock and
+  never answers gets a message saying so, instead of a second copy.
+- The 2.x migration runs only in the copy that has the lock.
 
 ### Development
 
