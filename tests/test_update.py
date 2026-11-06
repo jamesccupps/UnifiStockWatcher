@@ -9,12 +9,17 @@ import base64
 import hashlib
 import json
 import os
+import subprocess
+import sys
 import zipfile
+from pathlib import Path
 
 import pytest
 
 import ed25519
 import updater
+
+ROOT = Path(__file__).resolve().parent.parent
 
 crypto = pytest.importorskip("cryptography.hazmat.primitives.asymmetric.ed25519")
 from cryptography.hazmat.primitives import serialization  # noqa: E402
@@ -408,3 +413,60 @@ def test_a_release_without_latest_json_means_up_to_date():
         def get(self, url, **kw):
             return R()
     assert updater.check(current="3.0.0", source=updater.DEFAULT_SOURCE, session=S()) is None
+
+
+# ── Signing a release (scripts/), run the way the workflows run them ────────
+
+def _script(name, *args, **env):
+    return subprocess.run([sys.executable, str(ROOT / "scripts" / name), *map(str, args)],
+                          capture_output=True, text=True, timeout=60, env=dict(os.environ, **env))
+
+
+def _pem(k):
+    return k.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                           serialization.NoEncryption()).decode()
+
+
+@pytest.fixture
+def unsigned(tmp_path):
+    """What the release's build job hands the signing job."""
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / updater.INSTALLER_NAME).write_bytes(b"MZ installer " * 50)
+    (dist / updater.PORTABLE_NAME).write_bytes(b"PK zip " * 50)
+    return dist
+
+
+def test_sign_release_takes_the_key_text_from_the_environment(unsigned, key):
+    """The signing job passes the secret's text, never a file; a secret pasted
+    with blank lines around it still works. (USW_SIGNING_KEY points nowhere,
+    so a fallback to the development PC's own key file can't hide a bug.)"""
+    r = _script("sign_release.py", unsigned, "v9.9.9", USW_SIGNING_KEY_PEM=f"\n{_pem(key)}  \n",
+                USW_SIGNING_KEY=str(unsigned / "no-such-key.pem"))
+    assert r.returncode == 0, r.stderr
+    m = updater.verify_manifest((unsigned / "latest.json").read_text(encoding="utf-8"))
+    assert m["version"] == "9.9.9"
+    for kind, name in (("installer", updater.INSTALLER_NAME), ("portable", updater.PORTABLE_NAME)):
+        assert m[kind]["sha256"] == hashlib.sha256((unsigned / name).read_bytes()).hexdigest()
+
+
+def test_ci_rehearses_signing_with_a_throwaway_key(unsigned, key):
+    """ci.yml's signing job: the helper's throwaway key signs, and
+    verify_release checks against its public half, which nothing else accepts."""
+    out = _script("update_test_helper.py", "key")
+    assert out.returncode == 0, out.stderr
+    public, pem = out.stdout.split("\n", 1)
+    r = _script("sign_release.py", unsigned, "9.9.9", USW_SIGNING_KEY_PEM=pem,
+                USW_SIGNING_KEY=str(unsigned / "no-such-key.pem"))
+    assert r.returncode == 0, r.stderr
+    ok = _script("verify_release.py", unsigned, "v9.9.9", "--public-key", public)
+    assert ok.returncode == 0, ok.stderr
+    assert "throwaway" in ok.stdout
+    other = base64.b64encode(key.public_key().public_bytes(serialization.Encoding.Raw,
+                                                           serialization.PublicFormat.Raw)).decode()
+    assert _script("verify_release.py", unsigned, "9.9.9").returncode != 0      # the app's key
+    assert _script("verify_release.py", unsigned, "9.9.9", "--public-key", other).returncode != 0
+    assert _script("verify_release.py", unsigned, "9.9.8", "--public-key", public).returncode != 0
+    (unsigned / updater.PORTABLE_NAME).write_bytes(b"changed after signing")
+    bad = _script("verify_release.py", unsigned, "--public-key", public)
+    assert bad.returncode != 0 and "don't match" in bad.stderr

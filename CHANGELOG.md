@@ -2,6 +2,22 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased
+
+### Development
+
+- **Releases are signed in a job of their own.** `release.yml` is three jobs: *build* (tests, the unsigned
+  folder, zip and installer, and the portable, installer and update tests on them), *sign* (a fresh Linux
+  runner in the `release` environment that installs only `requirements-sign.txt`, hash-pinned `cryptography`
+  wheels, signs `latest.json` for the build's files and checks it against the app's key) and *publish* (the only
+  job that can write, after checking the files against `SHA256SUMS.txt`). The release key was on disk while
+  PyInstaller and its unpinned dependencies ran; now it reaches only the signing script, through the
+  environment, and is never written to a file.
+- CI rehearses the signing job on every build with a throwaway key (`update_test_helper.py key`,
+  `verify_release.py --public-key`), so an update to `requirements-sign.txt` is tried before a release needs it.
+- Inno Setup is pinned (6.7.4, by SHA-256, `scripts/install_inno.ps1`) in CI and the release, instead of
+  whichever version the runner image has. `build_windows.py --no-sign`.
+
 ## v3.2.1
 
 Fixes from a review of 3.2.0. Each has a test that fails on 3.2.0.

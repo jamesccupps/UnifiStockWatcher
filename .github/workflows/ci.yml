@@ -1,7 +1,8 @@
 # Tests on every push to main and every pull request: the offline suite on Windows and Linux
 # across the supported Pythons, then the Windows build users get - the program folder, the zip
 # and the installer (unsigned here) - started in its self-test mode, installed, self-tested and
-# uninstalled, and the previous release updated to it. The build is kept as an artifact for a week.
+# uninstalled, and the previous release updated to it. The build is kept as an artifact for a week,
+# and the release's signing job is rehearsed on it with a throwaway key.
 name: CI
 
 on:
@@ -100,17 +101,19 @@ jobs:
           cache: pip
           cache-dependency-path: requirements*.txt
 
-      - name: Install dependencies and Inno Setup
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
-          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
-            choco install innosetup --no-progress -y
-          }
+
+      # The release builds with the same pinned Inno Setup.
+      - name: Install Inno Setup (pinned)
+        shell: pwsh
+        run: ./scripts/install_inno.ps1
 
       - name: Build (unsigned)
-        run: python scripts/build_windows.py
+        run: python scripts/build_windows.py --no-sign
 
       - name: Self-test the portable build
         shell: pwsh
@@ -137,4 +140,44 @@ jobs:
             dist/UnifiStockWatcher-Setup.exe
             dist/UnifiStockWatcher-win64.zip
             dist/SHA256SUMS.txt
+          if-no-files-found: error
           retention-days: 7
+
+  # The release's signing job, with a throwaway key instead of the release key: the hash-pinned
+  # install of requirements-sign.txt (so a Dependabot update to it is tried before a release
+  # needs it), signing this build's files on Linux, and the check of latest.json against the key.
+  sign:
+    name: Signing rehearsal
+    needs: package
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the signing packages (hash-pinned, wheels only)
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r requirements-sign.txt
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: UnifiStockWatcher-windows
+          path: dist
+
+      - name: Sign with a throwaway key and check it
+        env:
+          USW_DATA_DIR: ${{ runner.temp }}/usw-data
+        run: |
+          key=$(python scripts/update_test_helper.py key)
+          public=$(head -n 1 <<<"$key")
+          v=$(python -c "import unifi_core; print(unifi_core.__version__)")
+          USW_SIGNING_KEY_PEM=$(tail -n +2 <<<"$key") python scripts/sign_release.py dist "v$v"
+          python scripts/verify_release.py dist "v$v" --public-key "$public"
+          cd dist
+          sha256sum UnifiStockWatcher-Setup.exe UnifiStockWatcher-win64.zip latest.json > SHA256SUMS.txt
+          sha256sum --check --strict SHA256SUMS.txt

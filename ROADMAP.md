@@ -5,9 +5,6 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **Sign releases in their own job.** Build unsigned, then sign in a separate job that installs only hash-pinned
-  `cryptography` and holds the key, then publish from a third: today the key is on disk while PyInstaller and
-  unpinned build dependencies run.
 - **One copy at a time, CLI included.** The CLI takes no single-instance lock (the installer and the updater
   wait only for the app's), and a second app window started while the first is still loading runs too.
 - **winget and SourceForge.** `JamesCupps.UnifiStockWatcher` 3.2.0 is submitted to winget-pkgs

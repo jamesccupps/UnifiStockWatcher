@@ -1,7 +1,17 @@
 # Push a tag vX.Y.Z (matching unifi_core.__version__) to test, build, sign, check and publish a
-# release. The release key comes from the UPDATE_SIGNING_KEY secret, lives in a temp file for this
-# job only, and latest.json is checked against the public key built into the app before anything
-# is published: a wrong secret stops the release here, not in users' updaters.
+# release, in three jobs:
+#
+#   build    tests, builds the folder, the zip and the installer unsigned, and runs the portable,
+#            installer and update tests on those files. PyInstaller, its dependencies and Inno
+#            Setup run here, and the release key never does.
+#   sign     on a fresh runner, in the `release` environment (the only place the
+#            UPDATE_SIGNING_KEY secret is given out): installs only requirements-sign.txt
+#            (hash-pinned cryptography), writes latest.json for the build's exact files, and checks
+#            it against the public key built into the app, so a wrong secret stops the release
+#            here, not in users' updaters. The key goes from the secret to the signing script
+#            through the environment and is never written to disk.
+#   publish  the only job that can write to the repository: checks the files against
+#            SHA256SUMS.txt and publishes them.
 #
 # What installed copies read from a release can never change: the tag vX.Y.Z, and the assets
 # UnifiStockWatcher-Setup.exe, UnifiStockWatcher-win64.zip and latest.json (updater.py).
@@ -19,11 +29,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  build:
+    name: Build and test
     runs-on: windows-latest
     timeout-minutes: 45
-    permissions:
-      contents: write          # the release itself, and only here
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,41 +53,23 @@ jobs:
           $v = python -c "import unifi_core; print(unifi_core.__version__)"
           if ("v$v" -ne $env:TAG) { throw "tag $env:TAG, but unifi_core.__version__ is $v" }
 
-      - name: Install dependencies and Inno Setup
+      - name: Install dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt -r requirements-dev.txt
-          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
-            choco install innosetup --no-progress -y
-          }
+
+      - name: Install Inno Setup (pinned)
+        shell: pwsh
+        run: ./scripts/install_inno.ps1
 
       - name: Lint and test
         run: |
           python -m pyflakes unifi_core.py unifi_watcher.py unifi_watcher_gui.py updater.py ed25519.py gfx.py theme.py tray.py winplatform.py webhooks.py
           python -m pytest tests --tb=short
 
-      - name: Write the signing key for this job
-        shell: pwsh
-        env:
-          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
-        run: |
-          if (-not $env:UPDATE_SIGNING_KEY) { throw "The UPDATE_SIGNING_KEY secret isn't set; an unsigned release would never reach installed copies." }
-          $f = Join-Path $env:RUNNER_TEMP 'update-signing-key.pem'
-          [IO.File]::WriteAllText($f, $env:UPDATE_SIGNING_KEY.Trim() + "`n")
-          "USW_SIGNING_KEY=$f" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Build the folder, the zip, the installer and the signed latest.json
-        run: python scripts/build_windows.py
-
-      - name: Remove the signing key
-        if: always()
-        shell: pwsh
-        run: Remove-Item -Force -ErrorAction SilentlyContinue (Join-Path $env:RUNNER_TEMP 'update-signing-key.pem')
-
-      - name: Verify latest.json against the key built into the app
-        shell: pwsh
-        run: python scripts/verify_release.py dist $env:GITHUB_REF_NAME
+      - name: Build the folder, the zip and the installer (unsigned)
+        run: python scripts/build_windows.py --no-sign
 
       - name: Self-test the portable build
         shell: pwsh
@@ -96,13 +87,101 @@ jobs:
           GITHUB_TOKEN: ${{ github.token }}
         run: ./scripts/test_update.ps1
 
-      - name: Publish the GitHub release
-        shell: pwsh
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-build
+          path: |
+            dist/UnifiStockWatcher-Setup.exe
+            dist/UnifiStockWatcher-win64.zip
+          if-no-files-found: error
+          retention-days: 30
+
+  sign:
+    name: Sign latest.json
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install the signing packages (hash-pinned, wheels only)
+        run: |
+          python -m pip install --disable-pip-version-check --require-hashes --only-binary :all: -r requirements-sign.txt
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release-build
+          path: dist
+
+      - name: Write latest.json for these files
+        env:
+          USW_SIGNING_KEY_PEM: ${{ secrets.UPDATE_SIGNING_KEY }}
+          USW_DATA_DIR: ${{ runner.temp }}/usw-data
+        run: |
+          if [ -z "$USW_SIGNING_KEY_PEM" ]; then
+            echo "::error::The UPDATE_SIGNING_KEY secret isn't set; an unsigned release would never reach installed copies."
+            exit 1
+          fi
+          python scripts/sign_release.py dist "$GITHUB_REF_NAME"
+
+      - name: Verify latest.json against the key built into the app
+        env:
+          USW_DATA_DIR: ${{ runner.temp }}/usw-data
+        run: python scripts/verify_release.py dist "$GITHUB_REF_NAME"
+
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum UnifiStockWatcher-Setup.exe UnifiStockWatcher-win64.zip latest.json > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-signed
+          path: |
+            dist/latest.json
+            dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  publish:
+    name: Publish the GitHub release
+    needs: [build, sign]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write          # the release itself, and only here
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check the files against SHA256SUMS.txt
+        working-directory: dist
+        run: |
+          sha256sum --check --strict SHA256SUMS.txt
+          ls -l
+
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
-          $notes = "release-notes/$tag.md"
-          $opts = @('--title', "UniFi Stock Watcher $($tag.TrimStart('v'))", '--verify-tag')
-          if (Test-Path $notes) { $opts += @('--notes-file', $notes) } else { $opts += '--generate-notes' }
-          gh release create $tag dist/UnifiStockWatcher-Setup.exe dist/UnifiStockWatcher-win64.zip dist/latest.json dist/SHA256SUMS.txt @opts
+          tag="$GITHUB_REF_NAME"
+          notes="release-notes/$tag.md"
+          opts=(--repo "$GITHUB_REPOSITORY" --title "UniFi Stock Watcher ${tag#v}" --verify-tag)
+          if [ -f "$notes" ]; then opts+=(--notes-file "$notes"); else opts+=(--generate-notes); fi
+          gh release create "$tag" dist/UnifiStockWatcher-Setup.exe dist/UnifiStockWatcher-win64.zip \
+            dist/latest.json dist/SHA256SUMS.txt "${opts[@]}"

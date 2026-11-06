@@ -1,6 +1,6 @@
 """Build the Windows release files into dist/.
 
-    python scripts/build_windows.py [--no-installer]
+    python scripts/build_windows.py [--no-installer] [--no-sign]
 
     dist/UnifiStockWatcher/            the program folder (PyInstaller)
     dist/UnifiStockWatcher-win64.zip   that folder plus portable.txt
@@ -10,9 +10,12 @@
     dist/SHA256SUMS.txt                hashes of the three files above
 
 Needs requirements-dev.txt (PyInstaller; cryptography to sign). The signing
-key is USW_SIGNING_KEY (a file path; CI writes the UPDATE_SIGNING_KEY secret
-there) or %USERPROFILE%\\.unifi-stock-watcher\\update-signing-key.pem. Without
-one, everything but latest.json is built, which is fine for testing.
+key is the one scripts/sign_release.py finds (USW_SIGNING_KEY_PEM, the file
+USW_SIGNING_KEY, or %USERPROFILE%\\.unifi-stock-watcher\\update-signing-key.pem).
+Without one, or with --no-sign, everything but latest.json is built, which is
+fine for testing. The release workflow builds with --no-sign and signs in a
+job of its own, so the key is never on the machine where PyInstaller and the
+installer's tools run; a local build signs, for a release made by hand.
 """
 
 import hashlib
@@ -110,12 +113,16 @@ def installer():
 
 
 def sign():
+    if "--no-sign" in sys.argv:
+        print("--no-sign; latest.json not written")
+        return None
+    pem = os.environ.get("USW_SIGNING_KEY_PEM")
     key = os.environ.get("USW_SIGNING_KEY") or (DEFAULT_KEY if DEFAULT_KEY.exists() else None)
-    if not key:
+    if not pem and not key:
         print("no signing key; latest.json not written")
         return None
     from scripts.sign_release import sign_release
-    return sign_release(DIST, __version__, key)
+    return sign_release(DIST, __version__, key, pem)
 
 
 def checksums():

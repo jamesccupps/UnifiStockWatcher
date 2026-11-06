@@ -5,6 +5,11 @@ release to this build for real.
         The newest published release older than this build, as X.Y.Z, or
         nothing if there is none. GITHUB_TOKEN, if set, goes to the API.
 
+    python scripts/update_test_helper.py key
+        A new throwaway Ed25519 key: its public half (base64) on the first
+        line, then its PEM text. CI's rehearsal of the release's signing job
+        signs with it.
+
     python scripts/update_test_helper.py sign RELEASE_DIR
         Write RELEASE_DIR/latest.json for this build's version, signed with a
         new throwaway key, and print the key's public half. Never the release
@@ -59,25 +64,28 @@ def previous():
         print(max(older)[1])
 
 
-def sign(release_dir):
-    sys.path.insert(0, str(ROOT))
+def throwaway_key():
+    """A new Ed25519 key: its PEM text, and its public half as base64."""
     from cryptography.hazmat.primitives import serialization
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+    key = Ed25519PrivateKey.generate()
+    pem = key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
+                            serialization.NoEncryption()).decode()
+    raw = key.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return pem, base64.b64encode(raw).decode()
+
+
+def key():
+    print("\n".join(reversed(throwaway_key())))
+
+
+def sign(release_dir):
+    sys.path.insert(0, str(ROOT))
     from scripts.sign_release import sign_release
     from unifi_core import __version__
-    key = Ed25519PrivateKey.generate()
-    fd, pem = tempfile.mkstemp(suffix=".pem")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(key.private_bytes(serialization.Encoding.PEM,
-                                       serialization.PrivateFormat.PKCS8,
-                                       serialization.NoEncryption()))
-        sign_release(release_dir, __version__, pem)
-    finally:
-        os.unlink(pem)
-    raw = key.public_key().public_bytes(serialization.Encoding.Raw,
-                                        serialization.PublicFormat.Raw)
-    print(base64.b64encode(raw).decode())
+    pem, public = throwaway_key()
+    sign_release(release_dir, __version__, key_pem=pem)
+    print(public)
 
 
 def drive(old_source, release_dir, kind, app_dir, old_pid, public_key, data_dir=None):
@@ -111,4 +119,4 @@ def drive(old_source, release_dir, kind, app_dir, old_pid, public_key, data_dir=
 
 if __name__ == "__main__":
     command, args = sys.argv[1], sys.argv[2:]
-    {"previous": previous, "sign": sign, "drive": drive}[command](*args)
+    {"previous": previous, "key": key, "sign": sign, "drive": drive}[command](*args)
