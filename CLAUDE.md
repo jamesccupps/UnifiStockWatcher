@@ -142,7 +142,11 @@ to an empty folder is the safe way to run a build.
 - **Start with Windows** writes `HKCU\...\Run\UniFi Stock Watcher` only when it has to change (Defender flags
   programs that keep rewriting Run keys). `refresh_autostart` repoints it at the running copy only when the
   program it names no longer exists, and only from `main()`: from the window's constructor, every self-test,
-  `demo.py` run and test run took it over. Uninstall removes it.
+  `demo.py` run and test run took it over. Uninstall removes it. A Scoop copy names Scoop's `current` junction
+  (`_frozen_exe`, `_scoop_current`), not the version folder `resolve()` leads to: 3.2.2's entry started the old
+  version after `scoop update` (its mutex made the new one just show it) and nothing after `scoop cleanup`.
+  `refresh_autostart` also moves an entry naming another version folder of the same Scoop app to `current`
+  (3.2.3 on); entries of other copies that exist are still left alone.
 - **Single instance** (`winplatform.SingleInstance`): one copy at a time, the app and the CLI alike (3.2.2 on), as
   the named mutex `JamesCupps.UnifiStockWatcher`, which Inno Setup waits on too; the CLI also holds
   `JamesCupps.UnifiStockWatcher.CLI`, so a refused copy can say which kind is running. A copy that finds the mutex

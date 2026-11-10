@@ -151,11 +151,39 @@ def open_path(path):
 
 # ── Start with Windows ───────────────────────────────────────────────────────
 
+def _scoop_current(exe):
+    """exe (resolved) through its Scoop app's `current` link, or None.
+
+    Scoop installs each version in apps\\unifistockwatcher\\<version> and
+    points a `current` junction at the newest. A `current` link beside this
+    copy's folder that leads to a sibling folder holding the same exe is that
+    layout. A sibling, not only this folder: the in-app updater writes the new
+    version into the folder it ran from, which `current` may since have left."""
+    apps = exe.parent.parent
+    current = apps / "current"
+    try:
+        target = current.resolve()
+        # (apps is resolved, so current resolves elsewhere only if it's a link)
+        if target != current and target.parent == apps and (target / exe.name).is_file():
+            return current / exe.name
+    except OSError:
+        pass
+    return None
+
+
+def _frozen_exe():
+    """This copy's exe, by the path that outlives an update: Scoop's `current`
+    link where there is one. resolve() alone follows the link, and 3.2.2's
+    Run entry named the version folder: after `scoop update` sign-in started
+    the old version, after `scoop cleanup` nothing."""
+    exe = Path(sys.executable).resolve()
+    return _scoop_current(exe) or exe
+
+
 def autostart_command():
     """What the Run key should hold to start this copy at sign-in."""
     if getattr(sys, "frozen", False):
-        exe = Path(sys.executable).resolve()
-        return f'"{exe}" --minimized --watch'
+        return f'"{_frozen_exe()}" --minimized --watch'
     pyw = Path(sys.executable).with_name("pythonw.exe")
     interp = pyw if pyw.exists() else Path(sys.executable)
     script = Path(__file__).resolve().parent / "unifi_watcher_gui.py"
@@ -207,17 +235,35 @@ def _command_exe(command):
     return command.split(" ", 1)[0] or None
 
 
+def _another_version_of_this_scoop_app(exe):
+    """Whether exe (a Run entry's program) is this copy's exe in a version
+    folder of the same Scoop app, as 3.2.2 and earlier wrote it."""
+    if not getattr(sys, "frozen", False):
+        return False
+    here = Path(sys.executable).resolve()
+    if _scoop_current(here) is None:
+        return False
+    try:
+        there = Path(exe).resolve()
+    except OSError:
+        return False
+    return there.parent.parent == here.parent.parent and \
+        os.path.normcase(there.name) == os.path.normcase(here.name)
+
+
 def refresh_autostart():
     """If Start with Windows is on but the program it starts is gone (the
     folder moved, an old install removed), point it at this copy. Never
     while that program still exists: any other copy starting (a portable
     one tried once, a self-test in a temp folder) took it over, and two kept
-    copies rewrote it on every start."""
+    copies rewrote it on every start. The one exception is this Scoop app's
+    own version folder, which `scoop update` leaves behind: that moves to
+    `current`."""
     current = autostart_value()
     if current is None or current == autostart_command():
         return
     exe = _command_exe(current)
-    if exe and Path(exe).exists():
+    if exe and Path(exe).exists() and not _another_version_of_this_scoop_app(exe):
         return
     set_autostart(True)
 

@@ -2,6 +2,23 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## v3.2.3
+
+Start with Windows on a Scoop install.
+
+### Fixed
+
+- **Start with Windows on a Scoop install named the version folder** (`apps\unifistockwatcher\3.2.2`), not
+  Scoop's `current` junction, because `autostart_command()` resolved the exe's path, which follows the junction.
+  After `scoop update`, sign-in kept starting the old version, which holds the single-instance mutex, so
+  starting the new one only showed the old one; after `scoop cleanup`, nothing started at sign-in, and the next
+  start wrote the new version's folder, so the next update broke it again. A `current` link beside the copy's
+  folder, leading to a sibling folder that holds the same exe, is now used instead (a sibling, not only this
+  folder: the in-app updater writes into the folder it ran from, which `current` may since have left).
+  `refresh_autostart()` moves an entry that names another version folder of the same Scoop app over to
+  `current` the first time 3.2.3 starts; entries of other copies (portable, installed, a self-test) that exist
+  are still left alone, and the registry is still written only when the value changes.
+
 ## v3.2.2
 
 One copy at a time, the command-line watcher included.

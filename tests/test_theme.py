@@ -1,6 +1,7 @@
 """Drawing, colours, the theme's palette, and the Windows integration that
 can be checked without touching the real registry or tray."""
 
+import os
 import struct
 import sys
 import types
@@ -193,6 +194,130 @@ def test_autostart_command_quotes_its_paths(monkeypatch, tmp_path):
     exe = tmp_path / "A B" / "UnifiStockWatcher.exe"
     monkeypatch.setattr(sys, "executable", str(exe))
     assert winplatform.autostart_command() == f'"{exe.resolve()}" --minimized --watch'
+
+
+# ── Start with Windows on a Scoop install ────────────────────────────────────
+#
+# Scoop puts each version in apps\unifistockwatcher\<version> and points a
+# `current` junction at the newest. 3.2.2 resolved the junction, so the Run
+# entry named the version folder: after `scoop update` sign-in started the old
+# version (and its mutex made the new one just show it), after `scoop cleanup`
+# nothing.
+
+EXE = "UnifiStockWatcher.exe"
+
+
+def _link_dir(link, target):
+    """A directory junction on Windows (what Scoop makes; no admin needed), a
+    symlink elsewhere."""
+    if sys.platform == "win32":
+        import _winapi
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        os.symlink(target, link, target_is_directory=True)
+
+
+def _unlink_dir(link):
+    # the link itself: a recursive delete through a junction can empty its target
+    if sys.platform == "win32":
+        os.rmdir(link)
+    else:
+        link.unlink()
+
+
+@pytest.fixture
+def scoop_app(tmp_path, monkeypatch):
+    """apps\\unifistockwatcher\\{3.2.2, 3.2.3} with `current` -> 3.2.3, as Scoop
+    leaves it after an update, and a frozen copy."""
+    app = (tmp_path / "apps" / "unifistockwatcher").resolve()
+    for version in ("3.2.2", "3.2.3"):
+        (app / version).mkdir(parents=True)
+        (app / version / EXE).write_bytes(b"")
+    _link_dir(app / "current", app / "3.2.3")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    yield app
+    _unlink_dir(app / "current")
+
+
+def _run(exe):
+    return f'"{exe}" --minimized --watch'
+
+
+@pytest.mark.parametrize("started_from", ["current", "3.2.3", "3.2.2"])
+def test_a_scoop_copy_starts_at_sign_in_through_current(scoop_app, monkeypatch, started_from):
+    """However it was started (the Start menu shortcut goes through `current`;
+    the in-app updater relaunches from the folder it updated, which `current`
+    may since have left), it names `current`."""
+    monkeypatch.setattr(sys, "executable", str(scoop_app / started_from / EXE))
+    assert winplatform.autostart_command() == _run(scoop_app / "current" / EXE)
+
+
+def test_a_version_folder_entry_moves_to_current(reg, scoop_app, monkeypatch):
+    """The entry 3.2.2 wrote is moved over the first time the fixed version
+    starts, though the program it names still exists."""
+    monkeypatch.setattr(sys, "executable", str(scoop_app / "current" / EXE))
+    reg.values[winplatform.RUN_VALUE] = _run(scoop_app / "3.2.2" / EXE)
+    winplatform.refresh_autostart()
+    assert reg.values[winplatform.RUN_VALUE] == _run(scoop_app / "current" / EXE)
+    assert reg.writes == 1
+
+
+def test_a_scoop_copy_writes_nothing_when_nothing_changes(reg, scoop_app, monkeypatch):
+    monkeypatch.setattr(sys, "executable", str(scoop_app / "current" / EXE))
+    reg.values[winplatform.RUN_VALUE] = _run(scoop_app / "current" / EXE)
+    winplatform.refresh_autostart()
+    winplatform.set_autostart(True)
+    winplatform.refresh_autostart()
+    assert reg.writes == 0
+
+
+def test_a_scoop_copy_leaves_other_copies_entries_alone(reg, scoop_app, tmp_path, monkeypatch):
+    """A portable copy, or another app's folder in the same Scoop: not ours to
+    take over while it exists."""
+    monkeypatch.setattr(sys, "executable", str(scoop_app / "current" / EXE))
+    for other in (tmp_path / "Portable" / EXE, scoop_app.parent / "otherapp" / "1.0" / EXE):
+        other.parent.mkdir(parents=True)
+        other.write_bytes(b"")
+        reg.values[winplatform.RUN_VALUE] = _run(other)
+        winplatform.refresh_autostart()
+        assert reg.values[winplatform.RUN_VALUE] == _run(other)
+    assert reg.writes == 0
+
+
+def test_a_copy_outside_scoop_keeps_its_own_path(reg, tmp_path, monkeypatch):
+    """A real folder called `current` beside it is just a folder, and its Run
+    entry is still left to another copy that exists."""
+    mine = tmp_path / "tools" / "UnifiStockWatcher"
+    (tmp_path / "tools" / "current").mkdir(parents=True)
+    (tmp_path / "tools" / "current" / EXE).write_bytes(b"")
+    mine.mkdir()
+    (mine / EXE).write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(mine / EXE))
+    assert winplatform.autostart_command() == _run(mine.resolve() / EXE)
+    reg.values[winplatform.RUN_VALUE] = _run(tmp_path / "tools" / "current" / EXE)
+    winplatform.refresh_autostart()
+    assert reg.writes == 0
+
+
+def test_a_current_link_out_of_scoops_layout_is_ignored(tmp_path, monkeypatch):
+    """A `current` link beside the folder that leads out of its parent, or to
+    a folder without this exe, isn't Scoop's."""
+    tools = (tmp_path / "tools").resolve()
+    mine, unrelated = tools / "UnifiStockWatcher", tools / "SomethingElse"
+    elsewhere = tmp_path.resolve() / "elsewhere"
+    for d in (mine, unrelated, elsewhere):
+        d.mkdir(parents=True)
+    (mine / EXE).write_bytes(b"")
+    (elsewhere / EXE).write_bytes(b"")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(mine / EXE))
+    for target in (elsewhere, unrelated):
+        _link_dir(tools / "current", target)
+        try:
+            assert winplatform.autostart_command() == _run(mine / EXE), target
+        finally:
+            _unlink_dir(tools / "current")
 
 
 # ── tray (real, Windows only) ────────────────────────────────────────────────
