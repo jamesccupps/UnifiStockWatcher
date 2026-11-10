@@ -6,8 +6,8 @@ category pages), diffed against the previous check. A tray icon, Start with Wind
 your phone (webhooks), history, an installer and a portable zip, signed in-app updates. Also a headless CLI
 watcher.
 
-The repo is public on GitHub (`jamesccupps/UnifiStockWatcher`), with a page on GitHub Pages and (planned) a
-SourceForge mirror and a winget package. Keep personal paths, the user's own watch list and machine settings out
+The repo is public on GitHub (`jamesccupps/UnifiStockWatcher`), with a page on GitHub Pages, a manifest in the
+user's Scoop bucket and (planned) a SourceForge mirror and a winget package. Keep personal paths, the user's own watch list and machine settings out
 of tracked files. Keep the README, `release-notes/`, CHANGELOG.md and this file current as work happens. Sibling
 projects with the same conventions: Slate (Rust) and Protect Panes (`UnifiCameraViewer`, Electron), whose
 release, update-signing and Pages setups this one follows.
@@ -207,6 +207,21 @@ What the updater reads from a release can never change, as every installed copy 
 suffix), those asset names, the manifest's shape (`updater.verify_manifest`), this repository. It never goes
 back a version, so a bad release is fixed by publishing a higher one.
 
+**What the Scoop bucket and winget rely on** (`bucket/unifistockwatcher.json` in `jamesccupps/scoop-bucket` updates
+itself from each release, every 4 hours, so a release needs no Scoop work as long as these hold):
+- Tag releases `vX.Y.Z` and publish them as the latest release, never a pre-release (`gh release create` without
+  `--prerelease`, as `release.yml` does).
+- Keep the file names, and the layout inside the zip, unchanged: `UnifiStockWatcher-win64.zip` holding
+  `UnifiStockWatcher\UnifiStockWatcher.exe` (the bucket's shortcut), `UnifiStockWatcher\UnifiStockWatcher-cli.exe`
+  (its `bin`) and `UnifiStockWatcher\portable.txt`, which the bucket deletes so a Scoop copy keeps its data in
+  `%APPDATA%` (a moved or renamed marker would make it portable, its data in a version folder `scoop update`
+  leaves behind).
+- Keep publishing `SHA256SUMS.txt` beside them, in `sha256sum`'s format: the bucket reads the zip's hash from it.
+- Sign before publishing (the `sign` job does), with every file attached when the release is created. Never
+  replace a file on a release that's out: Scoop and winget have recorded its hash. Fix it with a new version.
+- If a file name or the zip's layout must change, change `bucket/unifistockwatcher.json` in
+  `jamesccupps/scoop-bucket` in the same change.
+
 **The signing key** (Ed25519):
 - Private key: `%USERPROFILE%\.unifi-stock-watcher\update-signing-key.pem` on the development PC, and the same
   text in the environment secret `UPDATE_SIGNING_KEY` of the `release` environment (Settings → Environments;
@@ -224,7 +239,7 @@ pins for `requirements-dev.txt` and `requirements-sign.txt` (hashes included; ke
 jrsoftware/issrc's release). Checkouts keep no token (`persist-credentials: false`); only the release's publish
 job can write. Security reports: SECURITY.md (GitHub's private reporting).
 
-## Pages, SourceForge, winget
+## Pages, SourceForge, winget, Scoop
 
 - **Pages**: `pages.yml` publishes `site/` plus `assets/icon.png` when they change on `main` (Settings → Pages →
   Source: GitHub Actions). The page fetches the latest version from the GitHub API and links
@@ -248,6 +263,11 @@ job can write. Security reports: SECURITY.md (GitHub's private reporting).
   PR template. The CLA bot asks on every PR (labels it `Needs-CLA`) even though the user has signed: the user
 answers `@microsoft-github-policy-service agree` there. Validation takes about 45 minutes, then a moderator
 approves. First submission: 3.2.0, #470772.
+- **Scoop**: the user's bucket `jamesccupps/scoop-bucket` (`scoop bucket add jamesccupps
+  https://github.com/jamesccupps/scoop-bucket`, `scoop install jamesccupps/unifistockwatcher`), in the README's
+  Install and on the page's hero. It installs the zip without `portable.txt` (install kind `folder`: data in
+  %APPDATA%, the in-app updater swaps in place), with the app in the Start menu and the CLI on PATH. The bucket's
+  checkver/autoupdate does the rest; the release rules above keep it working.
 
 ## Pictures
 

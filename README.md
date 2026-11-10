@@ -64,6 +64,17 @@ and unzip it somewhere of your own, e.g. a USB stick or `%LOCALAPPDATA%\Programs
 settings in its own folder (that's what the `portable.txt` beside it does), and updates itself in place. Avoid
 `C:\Program Files`, which it can't write to.
 
+**Install with Scoop:** if you use [Scoop](https://scoop.sh):
+
+```
+scoop bucket add jamesccupps https://github.com/jamesccupps/scoop-bucket
+scoop install jamesccupps/unifistockwatcher
+```
+
+That's the portable zip, with a Start menu shortcut and `UnifiStockWatcher-cli` on your PATH. It keeps its watch
+list and settings in `%APPDATA%\UniFi Stock Watcher`, like the installer, so `scoop update unifistockwatcher` keeps
+them; the app's own updates work too.
+
 **From source:** Python 3.10 or newer, then `pip install -r requirements.txt` and `python unifi_watcher_gui.py`
 (or double-click `install_and_run.bat`).
 
@@ -196,7 +207,8 @@ running (`--test` and `--version` run anyway).
 
 **Settings → Apps → Installed apps → UniFi Stock Watcher → Uninstall** removes the program, its shortcuts and its
 Start with Windows entry. Your watch list and settings stay in `%APPDATA%\UniFi Stock Watcher`; delete that
-folder too if you don't need them. A portable copy: delete its folder.
+folder too if you don't need them. A portable copy: delete its folder. Scoop: `scoop uninstall unifistockwatcher`
+(the `%APPDATA%` folder stays, as above).
 
 ## How it works
 

@@ -65,6 +65,14 @@
   .btn.ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.45); font-weight: 500; font-size: 15px; padding: 10px 16px; }
   .btn.ghost:hover { background: rgba(255,255,255,.1); }
   .btn small { font-weight: 400; opacity: .75; font-size: 13px; }
+  .scoop { margin-top: 18px; }
+  .scoop p { margin: 0 0 6px; color: #a9c3dd; font-size: 14px; }
+  .scoop a { color: #d8e8f7; }
+  .scoop pre { margin: 0; padding: 10px 14px; background: rgba(0,0,0,.28); border: 1px solid rgba(255,255,255,.18);
+               border-radius: 8px; }
+  .scoop code { background: none; padding: 0; color: #e6f0fa; font-size: 13px; }
+  /* one command per line; a long one wraps with its continuation indented */
+  .scoop code span { display: block; padding-left: 2ch; text-indent: -2ch; white-space: pre-wrap; }
   .sub { color: #a9c3dd; font-size: 14px; margin-top: 12px; }
   .sub a { color: #d8e8f7; }
   .demo { margin: 0; }
@@ -107,6 +115,10 @@
         <a class="btn" id="primary" href="https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-Setup.exe">Download for Windows <small id="primary-note">UnifiStockWatcher-Setup.exe</small></a>
         <a class="btn ghost" href="https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-win64.zip">Portable zip</a>
         <a class="btn ghost" href="https://github.com/jamesccupps/UnifiStockWatcher">Source on GitHub</a>
+      </div>
+      <div class="scoop">
+        <p>Or with <a href="https://scoop.sh">Scoop</a>:</p>
+        <pre><code><span>scoop bucket add jamesccupps https://github.com/jamesccupps/scoop-bucket</span><span>scoop install jamesccupps/unifistockwatcher</span></code></pre>
       </div>
       <p class="sub"><span id="version">Free and open source (MIT).</span> Windows 10 and 11 (64-bit). <a href="https://github.com/jamesccupps/UnifiStockWatcher/releases">All releases</a></p>
     </div>
