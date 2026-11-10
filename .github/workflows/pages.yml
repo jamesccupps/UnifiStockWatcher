@@ -50,3 +50,20 @@ jobs:
     steps:
       - id: deployment
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      # IndexNow: tell Bing (and Yandex, Seznam, Naver, Yep) the page changed, so it's
+      # re-crawled now rather than whenever. The key is public by design: it's served at
+      # https://jamesccupps.github.io/6f4669f95049414a71045ac20c1d6046.txt (jamesccupps.github.io repository), which
+      # proves the site is ours. A failed ping is a warning, never a failed deploy.
+      - name: Tell IndexNow the page changed
+        env:
+          PAGE: ${{ steps.deployment.outputs.page_url }}
+          KEY: 6f4669f95049414a71045ac20c1d6046
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://api.indexnow.org/indexnow \
+            -H 'Content-Type: application/json; charset=utf-8' \
+            -d "{\"host\":\"jamesccupps.github.io\",\"key\":\"$KEY\",\"keyLocation\":\"https://jamesccupps.github.io/$KEY.txt\",\"urlList\":[\"$PAGE\"]}") || true
+          case "$code" in
+            200|202) echo "IndexNow accepted (HTTP $code)" ;;
+            *) echo "::warning title=IndexNow::not submitted (HTTP $code)" ;;
+          esac
