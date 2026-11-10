@@ -1,6 +1,8 @@
 """Build the Windows release files into dist/.
 
     python scripts/build_windows.py [--no-installer] [--no-sign]
+    python scripts/build_windows.py --program
+    python scripts/build_windows.py --package [--authenticode] [--no-sign]
 
     dist/UnifiStockWatcher/            the program folder (PyInstaller)
     dist/UnifiStockWatcher-win64.zip   that folder plus portable.txt
@@ -16,6 +18,15 @@ Without one, or with --no-sign, everything but latest.json is built, which is
 fine for testing. The release workflow builds with --no-sign and signs in a
 job of its own, so the key is never on the machine where PyInstaller and the
 installer's tools run; a local build signs, for a release made by hand.
+
+The release also splits the build in two. --program makes only the program
+folder (PyInstaller). --package makes the zip, the installer and the checksums
+from a program folder already in dist/, with the standard library and Inno
+Setup alone. With --authenticode it first has the two exes code-signed, and
+Inno Setup the uninstaller and Setup.exe, through scripts/authenticode.ps1
+(Azure Artifact Signing; it needs an Azure sign-in). The release's authenticode
+job runs --package --authenticode --no-sign, so nothing from PyPI runs where
+the code-signing identity is.
 """
 
 import hashlib
@@ -35,6 +46,8 @@ from updater import INSTALLER_NAME, PORTABLE_NAME, MANIFEST_NAME  # noqa: E402
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 APP_DIR = DIST / "UnifiStockWatcher"
+EXES = ("UnifiStockWatcher.exe", "UnifiStockWatcher-cli.exe")
+AUTHENTICODE = ROOT / "scripts" / "authenticode.ps1"
 DEFAULT_KEY = Path.home() / ".unifi-stock-watcher" / "update-signing-key.pem"
 
 PORTABLE_NOTE = f"""This file makes {APP_NAME} portable: it keeps its watch list,
@@ -70,7 +83,7 @@ def pyinstaller():
     subprocess.run([sys.executable, "-m", "PyInstaller", str(ROOT / "UnifiStockWatcher.spec"),
                     "--noconfirm", "--clean", "--distpath", str(DIST),
                     "--workpath", str(BUILD / "pyinstaller")], check=True, cwd=ROOT)
-    for exe in ("UnifiStockWatcher.exe", "UnifiStockWatcher-cli.exe"):
+    for exe in EXES:
         if not (APP_DIR / exe).is_file():
             raise SystemExit(f"PyInstaller produced no {exe}")
     if (APP_DIR / PORTABLE_MARKER).exists():
@@ -102,18 +115,30 @@ def find_iscc():
     return None
 
 
-def installer():
+def authenticode(path):
+    subprocess.run(["pwsh", "-NoProfile", "-NonInteractive", "-File", str(AUTHENTICODE), str(path)],
+                   check=True)
+
+
+def installer(code_sign=False):
     iscc = find_iscc()
     if not iscc:
+        if code_sign:
+            raise SystemExit("Inno Setup 6 not found: a code-signed build must include the installer")
         print("Inno Setup 6 not found (set ISCC, or install it); skipping the installer")
         return None
-    subprocess.run([iscc, f"/DAppVersion={__version__}", "/Q",
-                    str(ROOT / "installer" / "UnifiStockWatcher.iss")], check=True, cwd=ROOT)
+    args = [iscc, f"/DAppVersion={__version__}", "/Q"]
+    if code_sign:
+        # Inno Setup runs this for the uninstaller and Setup.exe: $f is the file (quoted), $q a
+        # quote. No literal quotes in the argument: Python would escape them as \", which ISCC's
+        # own command-line parsing doesn't undo.
+        args += ["/DSign", f"/Sauthenticode=pwsh -NoProfile -NonInteractive -File $q{AUTHENTICODE}$q $f"]
+    subprocess.run(args + [str(ROOT / "installer" / "UnifiStockWatcher.iss")], check=True, cwd=ROOT)
     return DIST / INSTALLER_NAME
 
 
-def sign():
-    if "--no-sign" in sys.argv:
+def sign(no_sign=False):
+    if no_sign:
         print("--no-sign; latest.json not written")
         return None
     pem = os.environ.get("USW_SIGNING_KEY_PEM")
@@ -134,15 +159,36 @@ def checksums():
     (DIST / "SHA256SUMS.txt").write_text("\n".join(lines) + "\n", encoding="ascii")
 
 
-def main():
-    shutil.rmtree(DIST, ignore_errors=True)
-    version_resource()
-    pyinstaller()
-    print("zip:", portable_zip())
-    if "--no-installer" not in sys.argv:
-        print("installer:", installer())
-    print("manifest:", sign())
-    checksums()
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    flags = set(argv)
+    if flags - {"--program", "--package", "--authenticode", "--no-installer", "--no-sign"} \
+            or {"--program", "--package"} <= flags:
+        raise SystemExit(__doc__)
+    code_sign = "--authenticode" in flags
+    if code_sign and ("--package" not in flags or "--no-installer" in flags):
+        raise SystemExit("--authenticode goes with --package, and a code-signed build includes the installer")
+
+    if "--package" in flags:
+        for exe in EXES:
+            if not (APP_DIR / exe).is_file():
+                raise SystemExit(f"--package needs the program folder: no {APP_DIR / exe}")
+        for name in (PORTABLE_NAME, INSTALLER_NAME, MANIFEST_NAME, "SHA256SUMS.txt"):
+            (DIST / name).unlink(missing_ok=True)
+    else:
+        shutil.rmtree(DIST, ignore_errors=True)
+        version_resource()
+        pyinstaller()
+
+    if "--program" not in flags:
+        if code_sign:
+            for exe in EXES:
+                authenticode(APP_DIR / exe)
+        print("zip:", portable_zip())
+        if "--no-installer" not in flags:
+            print("installer:", installer(code_sign))
+        print("manifest:", sign("--no-sign" in flags))
+        checksums()
     for p in sorted(DIST.iterdir()):
         if p.is_file():
             print(f"  {p.name:36} {p.stat().st_size:>12,} bytes")

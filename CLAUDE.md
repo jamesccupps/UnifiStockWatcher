@@ -23,6 +23,7 @@ python unifi_watcher_gui.py          # the app from source (uses the real %APPDA
 python scripts/demo.py               # the app against a pretend store (temp data folder, nothing real touched)
 python scripts/demo.py --shots site\images   # the README/site screenshots (Windows; see "Pictures")
 python scripts/build_windows.py      # dist\: folder, zip, installer (needs Inno Setup 6), latest.json (needs the key; --no-sign)
+                                     #   --program / --package [--authenticode]: the release's two halves (see Releasing)
 pwsh scripts/test_portable.ps1       # unzip dist's zip, check it's portable, run its self-test and the CLI
 pwsh scripts/test_installer.ps1 -Version X.Y.Z   # install/self-test/uninstall dist's Setup.exe (replaces an installed copy!)
 pwsh scripts/test_update.ps1 [-Kinds portable]  # the previous release updating itself to dist's build (installed: as above!)
@@ -193,19 +194,30 @@ to an empty folder is the safe way to run a build.
 2. `python -m pytest`, commit, push `main`, wait for CI (it builds and installer-tests the release files).
 3. `git tag -a vX.Y.Z -m "UniFi Stock Watcher X.Y.Z"` and `git push origin vX.Y.Z`.
 
-`.github/workflows/release.yml` then runs three jobs. **build** (Windows): checks the tag, tests, builds the
-folder, zip and Setup.exe unsigned (`build_windows.py --no-sign`, Inno Setup pinned by `install_inno.ps1`), runs
-the portable, installer and update tests on those files, and uploads the two. **sign** (Linux, the `release`
-environment, the only job given `UPDATE_SIGNING_KEY`): installs only `requirements-sign.txt` (`--require-hashes
---only-binary :all:`), writes `latest.json` for the downloaded files with the key passed as text in
-`USW_SIGNING_KEY_PEM` (never written to disk), verifies it against the key built into the app
-(`scripts/verify_release.py`), and writes `SHA256SUMS.txt`. **publish** (the only job with `contents: write`):
-`sha256sum --check`, then the release with `UnifiStockWatcher-Setup.exe`, `UnifiStockWatcher-win64.zip`,
-`latest.json` and `SHA256SUMS.txt`, all attached at creation (SourceForge's GitHub sync doesn't see files added
-later). Installed copies find it through `releases/latest/download/latest.json` and download from that version's
-tag. So PyInstaller, its unpinned dependencies and Inno Setup never run where the key is. CI's `sign` job
-rehearses the signing job on every build with a throwaway key (`update_test_helper.py key`, `verify_release.py
---public-key`).
+`.github/workflows/release.yml` then runs five jobs. **build** (Windows, no secrets): checks the tag, tests,
+builds the program folder unsigned (`build_windows.py --program`) and uploads it (`program-build`).
+**authenticode** (Windows, the `release` environment, the only job with `id-token: write`): signs in to Azure
+with GitHub's OIDC token (`azure/login`), code-signs both exes as James Cupps through Azure Artifact Signing
+(`scripts/authenticode.ps1`), then makes the zip and Setup.exe around them (`build_windows.py --package
+--authenticode --no-sign`, Inno Setup pinned by `install_inno.ps1`, whose SignTool signs the uninstaller and
+Setup.exe), and uploads the two (`release-build`). Nothing from PyPI runs there and the program never does.
+**verify** (Windows, no secrets): the portable, installer and update tests on those exact files, the first two
+with `-Publisher 'CN=James Cupps, O=James Cupps'` (`scripts/check_signatures.ps1`: every exe, the installed
+uninstaller too, validly signed and timestamped). **sign** (Linux, the `release` environment, the only job
+given `UPDATE_SIGNING_KEY`): installs only `requirements-sign.txt` (`--require-hashes --only-binary :all:`),
+writes `latest.json` for the signed files with the key passed as text in `USW_SIGNING_KEY_PEM` (never written to
+disk), verifies it against the key built into the app (`scripts/verify_release.py`), and writes
+`SHA256SUMS.txt`. **publish** (the only job with `contents: write`): `sha256sum --check`, then the release with
+`UnifiStockWatcher-Setup.exe`, `UnifiStockWatcher-win64.zip`, `latest.json` and `SHA256SUMS.txt`, all attached at
+creation (SourceForge's GitHub sync doesn't see files added later). Installed copies find it through
+`releases/latest/download/latest.json` and download from that version's tag. So PyInstaller and its unpinned
+dependencies never run where the key or the code-signing identity is. CI's `sign` job rehearses the signing job
+on every build with a throwaway key (`update_test_helper.py key`, `verify_release.py --public-key`).
+`tests/test_build_windows.py` holds the workflow to this.
+
+A tag `vX.Y.Z-signtest.N` (X.Y.Z = `__version__`) runs build, authenticode and verify and publishes nothing:
+for trying a code-signing change. Delete it afterwards (`git push origin :refs/tags/<tag>`). The signature
+checks' results are annotations (`::notice title=Signature::`), readable without signing in.
 
 What the updater reads from a release can never change, as every installed copy reads it: the tag `vX.Y.Z` (no
 suffix), those asset names, the manifest's shape (`updater.verify_manifest`), this repository. It never goes
@@ -221,7 +233,7 @@ itself from each release, every 4 hours, so a release needs no Scoop work as lon
   `%APPDATA%` (a moved or renamed marker would make it portable, its data in a version folder `scoop update`
   leaves behind).
 - Keep publishing `SHA256SUMS.txt` beside them, in `sha256sum`'s format: the bucket reads the zip's hash from it.
-- Sign before publishing (the `sign` job does), with every file attached when the release is created. Never
+- Sign before publishing (the `authenticode` and `sign` jobs do), with every file attached when the release is created. Never
   replace a file on a release that's out: Scoop and winget have recorded its hash. Fix it with a new version.
 - If a file name or the zip's layout must change, change `bucket/unifistockwatcher.json` in
   `jamesccupps/scoop-bucket` in the same change.
@@ -234,8 +246,14 @@ itself from each release, every 4 hours, so a release needs no Scoop work as lon
   manual install of a build with a new `update_key.py`).
 - `scripts/make_signing_key.py` made it and refuses to replace it. A local `build_windows.py` signs with the
   file, so a release can be built by hand if CI is down: attach the same four files.
-- Not Authenticode: the exe isn't code-signed (SmartScreen shows "Run anyway"); the user chose the Protect Panes
-  scheme over Slate's Azure Artifact Signing.
+
+**Code signing** (Authenticode, from the release after 3.2.3; earlier releases were unsigned): Azure Artifact
+Signing, the account and certificate Slate, NoteForge and PingerPlot use (account `SlateAccount`, profile `Slate`,
+endpoint `https://eus.codesigning.azure.net/`; subject `CN=James Cupps, O=James Cupps, ...`). The app registration
+"Slate signing" has a federated credential for `repo:jamesccupps/UnifiStockWatcher:environment:release` (this
+repository sends the classic subject format; checked 2026-11-10), and the `AZURE_CLIENT_ID`, `AZURE_TENANT_ID` and
+`AZURE_SUBSCRIPTION_ID` secrets name it. No password or key is stored. Four signatures a release (both exes, the
+uninstaller, Setup.exe). It sits beside the Ed25519 update signature, not instead of it.
 
 Workflow actions are pinned to commits (version in a comment); Dependabot proposes newer ones monthly, and newer
 pins for `requirements-dev.txt` and `requirements-sign.txt` (hashes included; keep its `cryptography` at

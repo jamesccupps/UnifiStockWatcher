@@ -3,12 +3,17 @@
 # CI runs it on a throwaway runner (ci.yml, release.yml); on a PC of your own it
 # replaces any installed copy, so quit and back up first.
 #
-#   pwsh scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version 3.0.0
+# With -Publisher (the release), Setup.exe and every exe it installs, the
+# uninstaller too, must be code-signed by that publisher.
+#
+#   pwsh scripts/test_installer.ps1 -Setup dist\UnifiStockWatcher-Setup.exe -Version 3.0.0 [-Publisher 'CN=..., O=...']
 param(
     [string]$Setup = "dist\UnifiStockWatcher-Setup.exe",
-    [Parameter(Mandatory = $true)][string]$Version
+    [Parameter(Mandatory = $true)][string]$Version,
+    [string]$Publisher = ''
 )
 $ErrorActionPreference = 'Stop'
+if ($Publisher) { & (Join-Path $PSScriptRoot 'check_signatures.ps1') -Publisher $Publisher -Path $Setup }
 $quiet = '/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART'
 
 $p = Start-Process $Setup -ArgumentList $quiet -Wait -PassThru
@@ -26,6 +31,10 @@ foreach ($f in 'UnifiStockWatcher.exe', 'UnifiStockWatcher-cli.exe', 'unins000.e
 }
 # install_kind() tells an installed copy by unins000.exe and a portable one by this file.
 if (Test-Path (Join-Path $dir 'portable.txt')) { throw "the installed copy carries portable.txt" }
+if ($Publisher) {
+    & (Join-Path $PSScriptRoot 'check_signatures.ps1') -Publisher $Publisher `
+        -Path @(Get-ChildItem $dir -Filter *.exe | ForEach-Object FullName)
+}
 if (-not $dir.StartsWith((Join-Path $env:LOCALAPPDATA 'Programs'))) { throw "installed outside %LOCALAPPDATA%\Programs: $dir" }
 $fileVersion = (Get-Item $exe).VersionInfo.ProductVersion
 if ($fileVersion -ne $Version) { throw "the exe says $fileVersion, not $Version" }

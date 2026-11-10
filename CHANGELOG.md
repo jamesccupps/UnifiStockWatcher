@@ -2,6 +2,17 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased
+
+### Security
+
+- **The Windows downloads are code-signed by James Cupps** (Azure Artifact Signing, timestamped):
+  `UnifiStockWatcher.exe` and `UnifiStockWatcher-cli.exe` in both downloads, the installer and the uninstaller,
+  so Windows names the publisher instead of "Unknown publisher". The release signs in a job of its own that runs
+  nothing from PyPI and never runs the program, then tests the signed files (every signature checked, the
+  installed uninstaller's too) before `latest.json` is signed and anything is published. The Ed25519 update
+  signature is unchanged.
+
 ## v3.2.3
 
 Start with Windows on a Scoop install.

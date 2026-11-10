@@ -2,8 +2,10 @@
 # copy (its files stay beside it, never in %TEMP% or %APPDATA%), and run the
 # GUI's self-test and the CLI there.
 #
-#   pwsh scripts/test_portable.ps1 [-Zip dist\UnifiStockWatcher-win64.zip]
-param([string]$Zip = "dist\UnifiStockWatcher-win64.zip")
+# With -Publisher (the release), both exes must also be code-signed by that publisher.
+#
+#   pwsh scripts/test_portable.ps1 [-Zip dist\UnifiStockWatcher-win64.zip] [-Publisher 'CN=..., O=...']
+param([string]$Zip = "dist\UnifiStockWatcher-win64.zip", [string]$Publisher = '')
 $ErrorActionPreference = 'Stop'
 
 $root = Join-Path ([IO.Path]::GetTempPath()) "usw-portable-$PID"
@@ -11,6 +13,10 @@ Expand-Archive $Zip -DestinationPath $root -Force
 $dir = Join-Path $root 'UnifiStockWatcher'
 foreach ($f in 'UnifiStockWatcher.exe', 'UnifiStockWatcher-cli.exe', 'portable.txt', 'LICENSE') {
     if (-not (Test-Path (Join-Path $dir $f))) { throw "the zip has no UnifiStockWatcher\$f" }
+}
+if ($Publisher) {
+    & (Join-Path $PSScriptRoot 'check_signatures.ps1') -Publisher $Publisher `
+        -Path (Join-Path $dir 'UnifiStockWatcher.exe'), (Join-Path $dir 'UnifiStockWatcher-cli.exe')
 }
 
 # The CLI reports where it keeps its files: beside the exe, for a portable copy. A frozen app that
