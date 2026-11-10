@@ -38,18 +38,16 @@ then goes stale. Step 3 below brings in the releases only, and keeps them coming
 Alerts you the moment a product is back in stock on the Ubiquiti Store
 ```
 
-**Full Description:**
+**Full Description** (1,000 characters, SourceForge's limit, counting each line break as two; this is 994):
 
 ```
 UniFi Stock Watcher tells you the moment something you want is back in stock on the Ubiquiti Store (store.ui.com). Pick the products from the live catalog; the app checks the whole store on a timer and alerts you with a notification you can click, a sound, and the product's page in your browser.
 
 Each check reads the entire UniFi catalog, about 490 products in 8 requests, whether you watch one product or fifty, and a live feed shows everything that came into or went out of stock anywhere in the store. Out-of-stock products show the store's own restock estimate and how long they've been sold out.
 
-It runs in the notification area and can start with Windows, keeps a searchable history of changes, and updates itself with signed releases. Light and dark themes follow Windows. US, EU, UK and Canada stores. Also a command-line watcher for servers and Task Scheduler.
+It runs in the notification area, can start with Windows, keeps a searchable history and updates itself with signed releases. Downloads are code-signed by James Cupps; it's also in Scoop. Its themes follow Windows. US, EU, UK and Canada stores, plus a command-line watcher.
 
-No account, no API key: it reads the store's public catalog at a polite interval. Free and open source (MIT). Source, issues and documentation: https://github.com/jamesccupps/UnifiStockWatcher
-
-An independent project, not made, endorsed or supported by Ubiquiti. UniFi is a trademark of Ubiquiti Inc.
+No account, no API key: it reads the store's public catalog at a polite interval. Free and open source (MIT).
 ```
 
 **Features** (Admin → Features, if the project shows that page; one per line):
@@ -61,7 +59,7 @@ Restock estimates and how long a product has been sold out
 Live feed of every stock change across the store
 History of changes, searchable and exportable as CSV
 Runs in the notification area; Start with Windows
-Signed one-click in-app updates
+Code-signed downloads and signed one-click in-app updates
 Windows 11-style light and dark themes in any accent colour
 US, EU, UK and Canada stores
 Installer (no admin) or portable zip; command-line watcher included
