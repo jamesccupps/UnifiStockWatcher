@@ -38,16 +38,18 @@ then goes stale. Step 3 below brings in the releases only, and keeps them coming
 Alerts you the moment a product is back in stock on the Ubiquiti Store
 ```
 
-**Full Description** (1,000 characters, SourceForge's limit, counting each line break as two; this is 994):
+**Full Description** (1,000 characters, SourceForge's limit, counting each line break as two; this is 988):
 
 ```
 UniFi Stock Watcher tells you the moment something you want is back in stock on the Ubiquiti Store (store.ui.com). Pick the products from the live catalog; the app checks the whole store on a timer and alerts you with a notification you can click, a sound, and the product's page in your browser.
 
-Each check reads the entire UniFi catalog, about 490 products in 8 requests, whether you watch one product or fifty, and a live feed shows everything that came into or went out of stock anywhere in the store. Out-of-stock products show the store's own restock estimate and how long they've been sold out.
+Each check reads the whole catalog, about 490 products in 8 requests, however many you watch, and a live feed shows every stock change. Out-of-stock products show the store's restock estimate and how long they've been sold out.
 
 It runs in the notification area, can start with Windows, keeps a searchable history and updates itself with signed releases. Downloads are code-signed by James Cupps; it's also in Scoop. Its themes follow Windows. US, EU, UK and Canada stores, plus a command-line watcher.
 
 No account, no API key: it reads the store's public catalog at a polite interval. Free and open source (MIT).
+
+Not affiliated with Ubiquiti. UniFi is a trademark of Ubiquiti Inc.
 ```
 
 **Features** (Admin → Features, if the project shows that page; one per line):
