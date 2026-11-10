@@ -2,7 +2,9 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
-## Unreleased
+## v3.2.4
+
+Signed downloads. No other changes from 3.2.3.
 
 ### Security
 

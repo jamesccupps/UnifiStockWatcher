@@ -247,7 +247,7 @@ itself from each release, every 4 hours, so a release needs no Scoop work as lon
 - `scripts/make_signing_key.py` made it and refuses to replace it. A local `build_windows.py` signs with the
   file, so a release can be built by hand if CI is down: attach the same four files.
 
-**Code signing** (Authenticode, from the release after 3.2.3; earlier releases were unsigned): Azure Artifact
+**Code signing** (Authenticode, from 3.2.4; earlier releases were unsigned): Azure Artifact
 Signing, the account and certificate Slate, NoteForge and PingerPlot use (account `SlateAccount`, profile `Slate`,
 endpoint `https://eus.codesigning.azure.net/`; subject `CN=James Cupps, O=James Cupps, ...`). The app registration
 "Slate signing" has a federated credential for `repo:jamesccupps/UnifiStockWatcher:environment:release` (this

@@ -36,8 +36,9 @@ a sound and the product's page in your browser. It sits in the notification area
   starts it there when you sign in.
 - **History.** Every change to the products you watch (or to the whole store), kept between runs, searchable
   and exportable as CSV.
-- **Signed updates.** It checks GitHub once a day and installs a new version with one click. A download is
-  installed only if it carries the release signature built into the app and matches its signed checksum.
+- **Signed downloads and updates.** From 3.2.4 the installer and the programs are code-signed by James Cupps.
+  It checks GitHub once a day and installs a new version with one click. A download is installed only if it
+  carries the release signature built into the app and matches its signed checksum.
 - **Looks at home on Windows 11.** Light and dark themes that follow Windows, in Windows' accent colour or one
   of your choosing, at any display scale.
 - **Four stores.** United States, Europe, United Kingdom and Canada.
@@ -55,8 +56,8 @@ and run it.
 - It installs for your Windows user only, with no admin prompt, into `%LOCALAPPDATA%\Programs\UniFi Stock Watcher`.
 - It adds a Start menu shortcut (and a desktop one if you tick it) and appears in **Settings → Apps** for
   uninstalling.
-- The app isn't code-signed, so Windows may show *Windows protected your PC* the first time: click **More info**,
-  then **Run anyway**. Each release lists the SHA-256 of every file in `SHA256SUMS.txt`.
+- From 3.2.4 the installer and the app are code-signed by **James Cupps**. If SmartScreen still warns about a new
+  release, **More info** shows that publisher. Each release lists the SHA-256 of every file in `SHA256SUMS.txt`.
 
 **Portable:** download
 [`UnifiStockWatcher-win64.zip`](https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-win64.zip)
@@ -200,7 +201,7 @@ running (`--test` and `--version` run anyway).
 | Stock looks wrong for one product | [Open an issue](https://github.com/jamesccupps/UnifiStockWatcher/issues/new?template=bug_report.yml) with its store link. A nightly check against the real store catches most changes on Ubiquiti's side the day they ship. |
 | The window is gone | It's in the notification area (click the tray icon). Starting the app again also brings it back. |
 | "The command-line watcher is running" | One copy watches at a time. Stop the watcher (Ctrl+C in its window, or end its Task Scheduler task), then start the app. |
-| "Windows protected your PC" | **More info → Run anyway**. The app isn't code-signed. |
+| "Windows protected your PC" | **More info** should show the publisher, James Cupps (3.2.4 and later), then **Run anyway**. 3.2.3 and earlier weren't code-signed. |
 | The update didn't install | Details are in `update.log` in the data folder. The previous version keeps running; the release page always has the full installer. |
 
 ## Uninstalling

@@ -19,7 +19,8 @@ Once it's fixed, the release notes say what was fixed (and who found it, if you'
 
 - `UnifiStockWatcher-Setup.exe`, `UnifiStockWatcher-win64.zip` and `latest.json` from the
   [releases](https://github.com/jamesccupps/UnifiStockWatcher/releases), built and signed by this repository's
-  GitHub Actions workflow;
+  GitHub Actions workflow. From 3.2.4 every exe in them is also code-signed by James Cupps (Azure Artifact
+  Signing); a missing or wrong signature in a current release is in scope;
 - the updater: it installs a download only if `latest.json` is signed with the Ed25519 key built into the app
   (`update_key.py`, checked by `ed25519.py`) and the download matches the size and SHA-256 that file lists;
 - what the app does with data from outside it: store responses, and watch lists imported from a file (product
