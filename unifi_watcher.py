@@ -275,7 +275,7 @@ def main():
 
         if in_stock and not notified.get(slug) and not wants_alert(settings, item):
             notified[slug] = True
-            print(f"          (no alert: {'muted' if item.get('muted') else 'favourites only'})")
+            print(f"          (no alert: {'muted' if item.get('muted') else 'favorites only'})")
         elif in_stock and not notified.get(slug):
             notify_windows(
                 f"IN STOCK: {title}",

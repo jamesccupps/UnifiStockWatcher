@@ -31,7 +31,7 @@ body:
     attributes:
       label: Version
       description: Settings → Updates shows it
-      placeholder: "3.2.4"
+      placeholder: "3.2.5"
     validations:
       required: true
   - type: dropdown

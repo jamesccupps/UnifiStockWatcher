@@ -412,7 +412,7 @@ def test_favourites_only_alerts_for_favourites(app, monkeypatch):
     app.set_setting("alert_favourites_only", True)
     captions = [w.cget("text") for w in app.list_frame.pack_slaves()
                 if isinstance(w, ttk.Label)]
-    assert captions == ["FAVOURITES  ·  1", "WATCHING  ·  1  ·  NO ALERTS"]
+    assert captions == ["FAVORITES  ·  1", "WATCHING  ·  1  ·  NO ALERTS"]
     app._on_in_stock(app.watched[0])
     assert notes == []
     app._on_in_stock(app.watched[1])

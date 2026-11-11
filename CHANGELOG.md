@@ -2,6 +2,22 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## v3.2.5
+
+US spelling in the app. No other changes from 3.2.4.
+
+### Changed
+
+- **The app's labels use US spelling**: *Favorites* (the watch list's heading, the ★ tooltip and menu, both
+  *Only for favorites* switches, the activity log, the CLI's "favorites only") and *Accent color* (the setting,
+  its swatches' tooltips and the color picker's title), matching the README and the page. The data keys keep
+  their spelling, so nothing needs migrating: `favourite` in the watch list and its export,
+  `alert_favourites_only` and `phone_favourites_only` in settings, and `favourite` in the JSON phone alerts
+  send, which Home Assistant automations may read. `tests/test_spelling.py` checks the app's string literals.
+- The README, the page and the SourceForge listing text use US spelling throughout (*gray*, *favorites*,
+  *accent color*), and the screenshots and social preview were retaken (at 100%: 820x790, Add products
+  900x650).
+
 ## v3.2.4
 
 Signed downloads. No other changes from 3.2.3.

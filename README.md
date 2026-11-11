@@ -15,7 +15,7 @@ a sound and the product's page in your browser. It sits in the notification area
 [All releases](https://github.com/jamesccupps/UnifiStockWatcher/releases) ·
 [Website](https://jamesccupps.github.io/UnifiStockWatcher/)
 
-![The watch list in the dark theme: two favourites (one sold out with a restock estimate, one back in stock with an Open in store button), more sold-out products, and the store-wide changes feed](site/images/watch-list-dark.png)
+![The watch list in the dark theme: two favorites (one sold out with a restock estimate, one back in stock with an Open in store button), more sold-out products, and the store-wide changes feed](site/images/watch-list-dark.png)
 
 <sub>Demo mode: a sample catalog with made-up stock, prices and dates.</sub>
 
@@ -26,7 +26,7 @@ a sound and the product's page in your browser. It sits in the notification area
   opened in your browser, once each time something comes back. Each one is a switch in Settings.
 - **On your phone too** (3.1). The same alert through ntfy, Pushover, Discord or Slack, or as JSON to any address
   (Home Assistant, n8n, …).
-- **Only the alerts you want** (3.2). Mute one product without removing it, or alert only for favourites, here or
+- **Only the alerts you want** (3.2). Mute one product without removing it, or alert only for favorites, here or
   just on the phone.
 - **Price changes** (3.2). Every price change of a product you watch goes into the history, and a price drop can
   alert you too.
@@ -39,7 +39,7 @@ a sound and the product's page in your browser. It sits in the notification area
 - **Signed downloads and updates.** From 3.2.4 the installer and the programs are code-signed by James Cupps.
   It checks GitHub once a day and installs a new version with one click. A download is installed only if it
   carries the release signature built into the app and matches its signed checksum.
-- **Looks at home on Windows 11.** Light and dark themes that follow Windows, in Windows' accent colour or one
+- **Looks at home on Windows 11.** Light and dark themes that follow Windows, in Windows' accent color or one
   of your choosing, at any display scale.
 - **Four stores.** United States, Europe, United Kingdom and Canada.
 - **A command-line watcher** too, for a server or Task Scheduler.
@@ -88,11 +88,11 @@ them; the app's own updates work too.
 3. When a product you watch comes back, you get the alert, its card turns green and gets an **Open in store**
    button.
 
-- **★** pins a product to the Favourites at the top. **⋯** on a card (or a right-click) has *Check now*, *Copy link*,
+- **★** pins a product to the Favorites at the top. **⋯** on a card (or a right-click) has *Check now*, *Copy link*,
   *Mute alerts* and *Remove*. Double-click a card to open its page.
 - A muted product (a crossed-out bell on its card; click the bell to unmute) is still checked and kept in the
-  history, but doesn't alert. **Settings → Alerts → Only for favourites** does the same for every product that isn't
-  starred, and **Settings → Alerts on your phone → Only for favourites** keeps the others off the phone and on the
+  history, but doesn't alert. **Settings → Alerts → Only for favorites** does the same for every product that isn't
+  starred, and **Settings → Alerts on your phone → Only for favorites** keeps the others off the phone and on the
   PC.
 - **Settings → Alerts → Tell me when a price drops** alerts you (a notification, and your phone if that's on) when a
   product you watch gets cheaper. The history keeps every price change either way, even one that happened while
@@ -103,8 +103,8 @@ them; the app's own updates work too.
 - **History** lists the changes to your watched products, or to the whole store. Double-click a line to open the
   product; **Export CSV…** saves what the list shows (it opens in Excel with € and £ intact).
 - **Settings** take effect as you change them: how often to check, the store, the alerts (on your phone too),
-  Start with Windows, the theme and accent colour, text size, and importing or exporting the watch list.
-- The tray icon is grey when idle, blue while watching, and gets a green dot when something you watch is in
+  Start with Windows, the theme and accent color, text size, and importing or exporting the watch list.
+- The tray icon is gray when idle, blue while watching, and gets a green dot when something you watch is in
   stock (not for a muted one). Click it to open the window; right-click for Start/Stop, Check now and Quit.
 - Each return to stock alerts once. A product that's already in stock when the app starts doesn't alert again;
   one that came back while it was closed does. Alerts that arrive together share one notification, which opens
@@ -147,6 +147,8 @@ Any address gets a POST with this JSON. `event` is `in_stock`, `price_drop` (wit
               "favourite": false}
 }
 ```
+
+The `favourite` key keeps the spelling it has always had, so automations built on it keep working.
 
 ## Where it keeps things
 
@@ -194,7 +196,7 @@ running (`--test` and `--version` run anyway).
 
 | What you see | Fix |
 |---|---|
-| No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. A muted product (crossed-out bell), or one that isn't a favourite with **Only for favourites** on, never alerts; the **Activity** view says *no alert* and why. |
+| No notification | Check **Settings → Alerts → Show a notification**, then Windows' *Settings → System → Notifications* for UniFi Stock Watcher, and Focus / Do not disturb. **Send a test alert** shows one. A muted product (crossed-out bell), or one that isn't a favorite with **Only for favorites** on, never alerts; the **Activity** view says *no alert* and why. |
 | Nothing on the phone | **Settings → Alerts on your phone → Send a test** shows what the service answered, e.g. *HTTP 404 (Unknown Webhook)* for a deleted Discord webhook. For ntfy, check the app is subscribed to exactly the topic in the address. The PC has to be on and watching. |
 | "Can't reach the store" | The store or your connection is down, or the store is refusing requests. The watcher keeps trying, less often each time (up to every half hour), and says when it's answering again. |
 | A product shows **DELISTED** | The store doesn't list it any more (renamed, discontinued, or pulled for a while). It's watched again as soon as it's back in the catalog, and its own page is asked again every 6 hours. If it was renamed, add the new one from the catalog. |

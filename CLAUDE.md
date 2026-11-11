@@ -7,10 +7,23 @@ your phone (webhooks), history, an installer and a portable zip, signed in-app u
 watcher.
 
 The repo is public on GitHub (`jamesccupps/UnifiStockWatcher`), with a page on GitHub Pages, a manifest in the
-user's Scoop bucket and (planned) a SourceForge mirror and a winget package. Keep personal paths, the user's own watch list and machine settings out
+user's Scoop bucket, a SourceForge mirror and (planned) a winget package. Keep personal paths, the user's own watch list and machine settings out
 of tracked files. Keep the README, `release-notes/`, CHANGELOG.md and this file current as work happens. Sibling
 projects with the same conventions: Slate (Rust) and Protect Panes (`UnifiCameraViewer`, Electron), whose
 release, update-signing and Pages setups this one follows.
+
+Conventions across the user's repos (from the 2026-11-11 review):
+- US spelling in the app's labels (3.2.5 on), the README, docs and the page. The data keys keep their old
+  spelling: `favourite` in the watch list and its export, `alert_favourites_only` / `phone_favourites_only` in
+  settings, and `favourite` in the JSON phone alerts send; renaming them would break existing files and Home
+  Assistant automations. `tests/test_spelling.py` checks the app's string literals (docstrings and those keys
+  aside). Identifiers and comments in the code weren't renamed.
+- The repository's About description starts with what the app is (search results show ~60 characters). If the
+  README's opening line changes, change it to match: `gh repo edit jamesccupps/UnifiStockWatcher --description "..."`.
+- Example addresses in docs and tests come from the documentation ranges (192.0.2.0/24, 198.51.100.0/24,
+  203.0.113.0/24), and example names are made up: never the user's own subnets, hostnames or places.
+- Release titles are "UniFi Stock Watcher X.Y.Z" (`release.yml` does this).
+- Session notes for Claude (handoffs, state files) stay out of the repository; this file is public on purpose.
 
 ## Commands
 
@@ -172,7 +185,7 @@ to an empty folder is the safe way to run a build.
   fixture resets state and calls `_rebuild_ui()`. It stubs `check_slug`, whose retries otherwise sleep 3 s
   against the blocked network and stall the next test's setup.
 - `test_update.py` builds signed release folders with `cryptography` and runs the real download/verify/swap code.
-- `tests_live/` runs nightly in CI (`contract.yml`) and opens an issue labelled `store-contract` when it fails.
+- `tests_live/` runs nightly in CI (`contract.yml`) and opens an issue labeled `store-contract` when it fails.
 - CI's `package` job builds the release files unsigned and runs `test_portable.ps1`, `test_installer.ps1` and
   `test_update.ps1`; the release workflow runs all three on the exact files before publishing.
 - `test_update.ps1` is the real N → N+1 update, both kinds. N is the newest published release older than this
@@ -266,7 +279,12 @@ job can write. Security reports: SECURITY.md (GitHub's private reporting).
 - **Pages**: `pages.yml` publishes `site/` plus `assets/icon.png` when they change on `main` (Settings → Pages →
   Source: GitHub Actions). The page fetches the latest version from the GitHub API and links
   `releases/latest/download/...`, so a release needs no deploy. `site/images/social-preview.png` (1280x640) is
-  also the repository's Settings → Social preview, which the user uploads by hand.
+  also the repository's Settings → Social preview, which the user uploads by hand. After each deploy the workflow
+  pings IndexNow (Bing and others re-crawl now; the key is public, served from the root of jamesccupps.github.io;
+  a failed ping is only a warning). Every page of the user's keeps its search tags (title ≤ 60 characters,
+  description ≤ 160, canonical URL, `og:site_name`, `og:image` alt and size, `theme-color`, width and height on
+  images) and ends with the "More tools from James Cupps" section (`.jc-more-grid`) linking the sibling tools and
+  the hub: keep both when editing `site/index.html`.
 - **SourceForge** (`unifi-stock-watcher`) mirrors GitHub's release files, never the other way round:
   `packaging/sourceforge/README.md` has the setup, the listing text, categories, screenshot captions and the
   logo. Unlock the project menu (lock icon), gear next to **Files** → **GitHub Integration**, with
@@ -296,4 +314,6 @@ approves. First submission: 3.2.0, #470772.
 `site/images/*.png` come from `python scripts/demo.py --shots site\images` (Windows; PrintWindow, so it works while
 covered): the real app against `scripts/demo.py`'s sample catalog (real product names, made-up stock, prices and
 dates). Never the user's own watch list. The README uses `site/images/watch-list-dark.png`.
-`scripts/make_social_preview.py` composes `social-preview.png` from them (needs Pillow).
+`scripts/make_social_preview.py` composes `social-preview.png` from them (needs Pillow). They come out at the
+display's scale: 3.2.5's were taken at 100% (820x790; Add products 900x650), earlier ones at 150%. The page's
+`<img>` width and height must match the files, and a new social preview has to be uploaded by hand.

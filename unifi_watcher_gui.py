@@ -668,8 +668,8 @@ class WatchedRow(ttk.Frame):
             style="Card.Fav.Icon.Subtle.TButton" if fav else "Card.Star.Icon.Subtle.TButton",
             command=lambda: app._toggle_fav(self.item), takefocus=False)
         self.star.grid(row=0, column=0, rowspan=2, padx=(0, S(6)))
-        Tooltip(self.star, "Remove from favourites" if fav else
-                "Add to favourites (shown first)", T)
+        Tooltip(self.star, "Remove from favorites" if fav else
+                "Add to favorites (shown first)", T)
         self.title_lbl = ttk.Label(self, text=item["title"], style="Card.Strong.TLabel",
                                    cursor="hand2")
         self.title_lbl.grid(row=0, column=1, sticky="sw")
@@ -707,7 +707,7 @@ class WatchedRow(ttk.Frame):
         m.add_command(label="Copy link", command=lambda: app._copy(
             product_url(item["slug"], app.settings.get("region", "us"))))
         m.add_separator()
-        m.add_command(label="Remove from favourites" if item.get("favourite") else "Add to favourites",
+        m.add_command(label="Remove from favorites" if item.get("favourite") else "Add to favorites",
                       command=lambda: app._toggle_fav(item))
         m.add_command(label="Unmute alerts" if item.get("muted") else "Mute alerts",
                       command=lambda: app._toggle_mute(item))
@@ -998,7 +998,7 @@ class SettingsTab(ttk.Frame):
                       "A notification, and your phone if that's on, when a product you watch "
                       "gets cheaper. The history keeps every price change either way.")
         self._switch(r, "price_alerts")
-        r = self._row(sec, "Only for favourites",
+        r = self._row(sec, "Only for favorites",
                       "Only starred products alert; the others are still checked and kept in "
                       "the history. To silence one product, right-click it and choose Mute alerts.")
         self._switch(r, "alert_favourites_only")
@@ -1026,7 +1026,7 @@ class SettingsTab(ttk.Frame):
         self.theme_box.bind("<<ComboboxSelected>>", lambda _: app.set_setting(
             "theme", {label: k for k, label in THEME_NAMES}[self.theme_box.get()]))
         self.theme_box.pack(side="right")
-        r = self._row(sec, "Accent colour", "Buttons, switches and the selected tab.")
+        r = self._row(sec, "Accent color", "Buttons, switches and the selected tab.")
         self._build_swatches(r)
         r = self._row(sec, "Text size")
         self.size_box = ttk.Combobox(r, state="readonly", width=6,
@@ -1089,7 +1089,7 @@ class SettingsTab(ttk.Frame):
                       "your own (Home Assistant, n8n, …). This PC sends them, so it has to be "
                       "on and watching.")
         self._switch(r, "phone_alerts", on_change=self._phone_toggled)
-        r = self._row(sec, "Only for favourites", "The others alert on this PC only.")
+        r = self._row(sec, "Only for favorites", "The others alert on this PC only.")
         self._switch(r, "phone_favourites_only")
         r = self._row(sec, "Service")
         self._services = {name: k for k, name in webhooks.SERVICES.items()}
@@ -1208,7 +1208,7 @@ class SettingsTab(ttk.Frame):
         size = S(26)
         swatches = list(theming.ACCENT_SWATCHES)
         if current and current not in [h for _, h in swatches]:
-            swatches.append(("Your colour", current))
+            swatches.append(("Your color", current))
         ttk.Button(parent, text="Custom…", style="Card.Subtle.TButton",
                    command=self._custom_accent).pack(side="right", padx=(S(4), 0))
         for name, hexv in reversed(swatches):
@@ -1224,11 +1224,11 @@ class SettingsTab(ttk.Frame):
                            command=lambda h=hexv: self.app.set_setting("accent", h))
             b.configure(padding=S(2))
             b.pack(side="right")
-            Tooltip(b, name if hexv else "Windows' accent colour", T)
+            Tooltip(b, name if hexv else "Windows' accent color", T)
 
     def _custom_accent(self):
         initial = self.app.settings.get("accent") or self.T.c["accent"]
-        result = colorchooser.askcolor(color=initial, title="Accent colour", parent=self)
+        result = colorchooser.askcolor(color=initial, title="Accent color", parent=self)
         if result and result[1]:
             self.app.set_setting("accent", result[1].lower())
 
@@ -1775,7 +1775,7 @@ class UnifiWatcherApp(tk.Tk):
 
         favourites = [i for i in self.watched if i.get("favourite")]
         others     = [i for i in self.watched if not i.get("favourite")]
-        for title, items, top in (("Favourites", favourites, 0),
+        for title, items, top in (("Favorites", favourites, 0),
                                   ("Watching", others, S(14) if favourites else 0)):
             if not items:
                 continue
@@ -1838,7 +1838,7 @@ class UnifiWatcherApp(tk.Tk):
                 break
         save_watched(self.watched)
         self._refresh_list()
-        self._log(f"{item['title']} {'added to' if is_fav else 'removed from'} favourites",
+        self._log(f"{item['title']} {'added to' if is_fav else 'removed from'} favorites",
                   "fav" if is_fav else "info")
 
     def _toggle_mute(self, item):
@@ -2228,7 +2228,7 @@ class UnifiWatcherApp(tk.Tk):
         region = self.settings.get("region", "us")
         url = product_url(item["slug"], region)
         if not wants_alert(self.settings, item):
-            why = "it's muted" if item.get("muted") else "only favourites alert"
+            why = "it's muted" if item.get("muted") else "only favorites alert"
             self._log(f"In stock: {item['title']} (no alert: {why})", "ok")
             return
         self._log(f"{'★ ' if is_fav else ''}In stock: {item['title']}", "ok")

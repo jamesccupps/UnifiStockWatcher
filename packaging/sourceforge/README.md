@@ -62,7 +62,7 @@ Live feed of every stock change across the store
 History of changes, searchable and exportable as CSV
 Runs in the notification area; Start with Windows
 Code-signed downloads and signed one-click in-app updates
-Windows 11-style light and dark themes in any accent colour
+Windows 11-style light and dark themes in any accent color
 US, EU, UK and Canada stores
 Installer (no admin) or portable zip; command-line watcher included
 ```
@@ -84,7 +84,7 @@ Installer (no admin) or portable zip; command-line watcher included
 
 | File | Caption |
 |---|---|
-| `watch-list-dark.png` | The watch list: favourites first, a product back in stock, restock estimates, and the store-wide changes feed |
+| `watch-list-dark.png` | The watch list: favorites first, a product back in stock, restock estimates, and the store-wide changes feed |
 | `add-products-dark.png` | Add products: the live catalog, searchable, by category, with stock status |
 | `watch-list-light.png` | The light theme |
 | `history-light.png` | History: every stock change, for your products or the whole store |
