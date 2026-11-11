@@ -105,6 +105,14 @@
     .brand img { width: 52px; height: 52px; }
     .tagline { font-size: 19px; }
   }
+
+  /* More tools from James Cupps */
+  .jc-more-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .jc-more-grid a { display: block; text-decoration: none; background: var(--panel, var(--card, transparent)); border: 1px solid var(--line, rgba(127,127,127,.3));
+                    border-radius: 10px; padding: 14px 16px; color: var(--text, inherit); }
+  .jc-more-grid a:hover { border-color: var(--accent, currentColor); }
+  .jc-more-grid b { display: block; color: var(--accent, inherit); }
+  .jc-more-grid span { color: var(--muted, inherit); font-size: 14px; }
 </style>
 </head>
 <body>
@@ -184,6 +192,17 @@
   <section>
     <h2>Feedback</h2>
     <p>Found a bug or have an idea? <a href="https://github.com/jamesccupps/UnifiStockWatcher/issues">Open an issue</a> on GitHub; in the app, Settings → About → <strong>Report…</strong> fills in the version. If a product shows the wrong stock, include its store link.</p>
+  </section>
+
+  <section aria-labelledby="jc-more">
+    <h2 id="jc-more">More tools from James Cupps</h2>
+    <div class="jc-more-grid">
+      <a href="https://jamesccupps.github.io/UnifiCameraViewer/"><b>Protect Panes</b><span>UniFi Protect live view, a window per camera</span></a>
+      <a href="https://jamesccupps.github.io/PingerPlot/"><b>PingerPlot</b><span>Continuous traceroute: where on the path it goes wrong</span></a>
+      <a href="https://jamesccupps.github.io/NetSentinel/"><b>NetSentinel</b><span>Network monitor and intrusion detection for Windows</span></a>
+      <a href="https://jamesccupps.github.io/Slate/"><b>Slate</b><span>A text editor for files of any size</span></a>
+      <a href="https://jamesccupps.github.io/"><b>Everything else</b><span>Every project, on one page</span></a>
+    </div>
   </section>
 </main>
 
