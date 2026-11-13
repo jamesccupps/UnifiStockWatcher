@@ -5,9 +5,9 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 
 ## Next
 
-- **winget and SourceForge.** `JamesCupps.UnifiStockWatcher` 3.2.0 is submitted to winget-pkgs
-  ([microsoft/winget-pkgs#470772](https://github.com/microsoft/winget-pkgs/pull/470772)), waiting for review; the
-  SourceForge mirror is still to set up (both described in CLAUDE.md).
+- **winget.** `JamesCupps.UnifiStockWatcher` 3.2.0 is submitted to winget-pkgs
+  ([microsoft/winget-pkgs#470772](https://github.com/microsoft/winget-pkgs/pull/470772)): validated, waiting for a
+  moderator to approve it. Later versions go in as their own pull requests (CLAUDE.md has the steps).
 
 ## Later, or if asked
 
@@ -17,8 +17,15 @@ What's planned or been asked for, roughly in order. Ideas welcome as
 - More stores, if Ubiquiti adds regions with the same site (only the four in `STORE_REGIONS` exist today).
 - Linux and macOS: the core and the CLI already run there; the window does too, without a tray icon or
   notifications.
-- Code signing (Authenticode), as Slate has through Azure Artifact Signing, to quiet SmartScreen on first run.
-  Not needed for updates, which are checked against the app's own release key.
+
+## Done
+
+- **Code signing** (3.2.4): both programs, the installer and its uninstaller are signed as James Cupps through
+  Azure Artifact Signing. Updates are still checked against the app's own release key as well.
+- **Scoop**: `scoop install jamesccupps/unifistockwatcher` from the bucket
+  [jamesccupps/scoop-bucket](https://github.com/jamesccupps/scoop-bucket), which picks up each release by itself.
+- **SourceForge**: [unifistockwatcher](https://sourceforge.net/projects/unifistockwatcher/) mirrors each
+  release's files from GitHub.
 
 ## Not planned
 

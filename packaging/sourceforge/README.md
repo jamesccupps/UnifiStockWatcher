@@ -12,10 +12,10 @@ verification).
 | Field | Enter |
 |---|---|
 | Project Name | `UniFi Stock Watcher` |
-| URL name | `unifi-stock-watcher` (3-30 letters, digits and dashes; it can't be changed later without a support ticket) |
+| URL name | `unifistockwatcher` (3-30 letters, digits and dashes; it can't be changed later without a support ticket) |
 | Tools | **Files** and **Reviews** only. Leave out Code, Tickets, Discussion and Wiki: those live on GitHub, and a second copy would drift. |
 
-The project will be at `https://sourceforge.net/projects/unifi-stock-watcher/`.
+The project is at `https://sourceforge.net/projects/unifistockwatcher/`.
 
 Don't use the GitHub *Importer* to create it. It makes a one-time copy of the code, issues and wiki, and that copy
 then goes stale. Step 3 below brings in the releases only, and keeps them coming.
@@ -101,7 +101,7 @@ From then on, every new GitHub release's files are imported automatically shortl
 
 - **3.0.0 was published before the integration existed**, so it isn't imported by itself. SourceForge
   re-checks a release when its text is edited, so edit the v3.0.0 release's notes on GitHub (for example, add a
-  line `Also on SourceForge: https://sourceforge.net/projects/unifi-stock-watcher/`) and save.
+  line `Also on SourceForge: https://sourceforge.net/projects/unifistockwatcher/`) and save.
 - SourceForge doesn't notice files added to a release after it was published. The release workflow attaches
   every file when it creates the release, so that's fine as long as releases aren't hand-edited to add files.
 

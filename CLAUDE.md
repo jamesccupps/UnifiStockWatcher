@@ -285,7 +285,7 @@ job can write. Security reports: SECURITY.md (GitHub's private reporting).
   description ≤ 160, canonical URL, `og:site_name`, `og:image` alt and size, `theme-color`, width and height on
   images) and ends with the "More tools from James Cupps" section (`.jc-more-grid`) linking the sibling tools and
   the hub: keep both when editing `site/index.html`.
-- **SourceForge** (`unifi-stock-watcher`) mirrors GitHub's release files, never the other way round:
+- **SourceForge** (`unifistockwatcher`) mirrors GitHub's release files, never the other way round:
   `packaging/sourceforge/README.md` has the setup, the listing text, categories, screenshot captions and the
   logo. Unlock the project menu (lock icon), gear next to **Files** → **GitHub Integration**, with
   `jamesccupps/UnifiStockWatcher`: each new release's files are imported after it's published. A release
