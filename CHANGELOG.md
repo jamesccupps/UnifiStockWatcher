@@ -2,6 +2,43 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## v3.2.6
+
+Fixes from the 2026-11-15 code review: no new features.
+
+### Fixed
+
+- **The daily update check could stop for good.** Each automatic check scheduled the next one, so a check that
+  came due while another check or a download was running, or while *Check for updates* was off, ended them
+  until the app restarted: a copy left running for weeks never looked again. The next check is now scheduled
+  first, whatever happens to this one (`_daily_update_check`), and turning the setting back on needs no restart.
+- **Changing the store alerted for everything in stock there.** It cleared the "already alerted" state, so the
+  first check of the new store notified (sound, phone, browser tabs too) for every watched product in stock
+  there. Each product's first check in the new store is now its baseline, as at start-up: what's in stock is
+  where it starts, and its next return alerts. The activity log says so.
+- **One product with an odd title or price could break Add products.** A `null` title failed the whole dialog
+  ("Couldn't reach the store: AttributeError"), and a price amount that isn't a number, or `"variants": null`,
+  failed the price sort. The CLI's first run failed the same way on a missing title. Titles go through
+  `product_title()` (the slug when there's none) and the price sort through `price_value()`.
+- **A product page in an unexpected shape was retried like a network failure**: three tries with sleeps, for that
+  product, every cycle. A page with no product data now reads as one without the product, at once. A
+  `historicalSlugs` that isn't a list is ignored (as text it matched any slug inside it, so `u7-pro` could find
+  `u7-pro-max`).
+- **A quick check started before a store change could mark the product delisted in the new store.**
+- **Saving the watch list after a change** (a star, a mute, adding or removing) that failed showed the generic
+  error dialog, with the change already on screen. It's now said in the activity log, as for settings: the
+  change applies until the app closes.
+- **Phone alerts still being sent when the app quit** (or restarted for an update), or when the CLI was stopped,
+  were dropped. Both now wait up to 3 seconds for them.
+- The watch list's fields are typed when it's loaded, not only on import (a hand-edited title that's a number
+  becomes text).
+- The History filter waits for typing to pause (180 ms) instead of rebuilding up to 2,000 rows per key.
+- The History CSV export starts a cell that begins with `=`, `+`, `-` or `@` with an apostrophe, so Excel doesn't
+  read a product's title as a formula.
+- The single-instance lock reads the mutex's last error the way ctypes guarantees (`use_last_error`), not with a
+  second foreign call.
+- `--finish-update` run by hand without its two arguments says what it needs instead of raising.
+
 ## v3.2.5
 
 US spelling in the app. No other changes from 3.2.4.

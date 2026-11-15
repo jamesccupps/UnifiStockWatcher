@@ -98,6 +98,8 @@ them; the app's own updates work too.
   product you watch gets cheaper. The history keeps every price change either way, even one that happened while
   the app was closed.
 - **Check now** (F5) checks straight away, watching or not. Ctrl+N opens the catalog; Ctrl+1/2/3 switch tabs.
+- Changing **Settings → Watching → Store** starts a new baseline: a product already in stock in the new store
+  doesn't alert, and its next return does.
 - The bottom panel has two views: **Store changes** (everything that changed anywhere in the store) and
   **Activity** (what the watcher did). Drag its top edge to resize it.
 - **History** lists the changes to your watched products, or to the whole store. Double-click a line to open the

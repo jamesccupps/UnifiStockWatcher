@@ -24,7 +24,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "3.2.5"
+__version__ = "3.2.6"
 
 APP_NAME = "UniFi Stock Watcher"
 APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
@@ -802,6 +802,31 @@ def get_price(product):
     return None
 
 
+def price_value(product):
+    """The first price as a number of cents, for sorting; None if unpriced.
+    Only numbers count: a text amount can't be compared with the others."""
+    for v in _variants(product):
+        price = v.get("displayPrice") or v.get("price")
+        if isinstance(price, dict):
+            price = price.get("amount")
+            if _is_number(price) and price:
+                return price
+        elif _is_number(price) and price:
+            return price * 100
+    return None
+
+
+def product_title(product):
+    """A product's name as text: its title, else its slug. Read from the store
+    as it comes, so a null or missing title can't fail a list of them."""
+    if not isinstance(product, dict):
+        return ""
+    title = product.get("title")
+    if title is None or title == "":
+        title = product.get("slug") or ""
+    return str(title)
+
+
 def is_coming_soon(product):
     """True when a product is announced but not yet purchasable.
 
@@ -940,7 +965,13 @@ def _fetch_product_page(build_id, slug, region="us"):
             continue
 
         r.raise_for_status()
-        page_props = r.json().get("pageProps", {})
+        # Read as it comes: a page with no object here has no product, the
+        # same as one without the key. (An AttributeError here was taken for
+        # a network failure and retried, with sleeps, every cycle.)
+        data = r.json()
+        page_props = data.get("pageProps") if isinstance(data, dict) else None
+        if not isinstance(page_props, dict):
+            page_props = {}
 
         target = page_props.get("__N_REDIRECT")
         if target:
@@ -960,7 +991,10 @@ def _find_product(page_props, slug):
     for the first "variants" key it could find, which on a page like ua-g2
     returns ua-g3's variants and reports the wrong product's stock.
     """
-    candidates = list((page_props.get("collection") or {}).get("products") or [])
+    if not isinstance(page_props, dict):
+        return None
+    collection = page_props.get("collection")
+    candidates = _objects(collection.get("products") if isinstance(collection, dict) else None)
     for key in ("product", "currentProduct"):
         if isinstance(page_props.get(key), dict):
             candidates.append(page_props[key])
@@ -970,7 +1004,9 @@ def _find_product(page_props, slug):
             return p
 
     for p in candidates:                       # renamed product
-        if slug in (p.get("historicalSlugs") or []):
+        # A list only: `in` on a string would match any slug inside it.
+        historical = p.get("historicalSlugs")
+        if isinstance(historical, list) and slug in historical:
             return p
 
     # Last resort. The page was reached by requesting this slug and following
@@ -1029,18 +1065,23 @@ def check_slug(build_id, slug, region="us", retries=3):
 
 # ── Config load/save ─────────────────────────────────────────────────────────
 
+def _short_text(value, limit):
+    return value[:limit] if isinstance(value, str) and value else None
+
+
 def _normalise_watched(data):
-    """Keep only well-formed entries, filling in optional fields."""
+    """Keep only well-formed entries, with each field the type the app uses:
+    the file may have been edited by hand. Other keys are kept as they are."""
     items = []
     for item in data if isinstance(data, list) else []:
         if not isinstance(item, dict) or not is_valid_slug(item.get("slug")):
             log.warning("Skipping malformed watch list entry: %r", item)
             continue
-        item.setdefault("title", item["slug"])
-        item.setdefault("favourite", False)
-        item.setdefault("muted", False)
-        item.setdefault("price", None)
-        item.setdefault("added_at", None)
+        item["title"] = product_title(item)[:200]
+        item["favourite"] = bool(item.get("favourite", False))
+        item["muted"] = bool(item.get("muted", False))
+        item["price"] = _short_text(item.get("price"), 40)
+        item["added_at"] = _short_text(item.get("added_at"), 40)
         items.append(item)
     return items
 
@@ -1354,15 +1395,14 @@ def import_watchlist(filepath):
     for item in _normalise_watched(raw):
         if item["slug"] in slugs:
             continue
-        added_at = item["added_at"]
+        # Typed by _normalise_watched; only the keys the app uses come in.
         existing.append({
             "slug":      item["slug"],
-            "title":     str(item["title"])[:200],
-            "favourite": bool(item["favourite"]),
-            "muted":     bool(item["muted"]),
-            "price":     item["price"][:40] if isinstance(item["price"], str) else None,
-            "added_at":  added_at[:40] if isinstance(added_at, str) and added_at
-                         else datetime.now().isoformat(),
+            "title":     item["title"],
+            "favourite": item["favourite"],
+            "muted":     item["muted"],
+            "price":     item["price"],
+            "added_at":  item["added_at"] or datetime.now().isoformat(),
         })
         slugs.add(item["slug"])
         added += 1

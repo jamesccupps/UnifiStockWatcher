@@ -89,18 +89,29 @@ to an empty folder is the safe way to run a build.
 - **Store quirks** (README "How it works"): redirect directives in 200 bodies, bare 307s with
   `x-nextjs-redirect`, renamed categories, `$0.00` meaning "no price yet", products found by slug, then
   `historicalSlugs`, then `currentProductId`. `check_slug` raises rather than guess. Slugs are validated
-  (`is_valid_slug`) before they go into any URL; `product_url()` falls back to the store's home.
+  (`is_valid_slug`) before they go into any URL; `product_url()` falls back to the store's home. Everything that
+  reads a store product takes its name from `product_title()` (the slug when the title is missing or null) and
+  sorts by `price_value()` (numbers only); a product page with no object where `pageProps` or a product should
+  be reads as "not on its page", answered at once: an `AttributeError` there was retried like a network failure.
 - **Threads and Tk.** Workers (watcher, quick check, catalog fetch, update) never call Tk. `_post()` puts work on
   a queue that `_drain()` runs every 40 ms on the main thread. A Tk call from another thread blocks until the
   main loop polls (every 20 ms in `_tkinter`): a cycle that posted with `after()` per row spent seconds queueing,
-  and posts after close raised. Tray callbacks run on the tray thread and also go through `_post`.
+  and posts after close raised. Tray callbacks run on the tray thread and also go through `_post`. A timer for a
+  tab's widget goes on the app (`self.app.after`), never the tab: destroying a widget deletes the Tcl commands of
+  its pending timers, and a theme change destroys the tabs (the History filter, the phone settings' save).
+- **The daily update check** (`_daily_update_check`) schedules the next one before deciding whether to run, and
+  runs for the app's life with the setting off. Until 3.2.6 each check scheduled its successor, so one that came
+  due during a check or download, or with the setting off, ended them until a restart.
 - **Alert once**: `_maybe_alert` marks `notified` on the worker before posting, so a quick check and a cycle
   finding the same product together alert once. Whether it alerts at all is `wants_alert()` (muted, favourites
   only, phone favourites only), asked in `_on_in_stock` on the main thread; a muted return still marks
   `notified`, so unmuting an in-stock product waits for its next return. Price changes are decided inside
   `StockHistory.record` (under its lock, so also once) and posted by `_recorded`. At start `notified` is seeded
   from `stock_history.last_state()` (`_seed_notified`; the CLI likewise): seeded empty, every launch alerted for
-  everything already in stock.
+  everything already in stock. A store change can't seed from the history (its last states are the old store's),
+  so `_on_region_changed` puts every watched slug in `_store_baseline`, and `_maybe_alert` takes each one's first
+  check in the new store as its starting state, without alerting (3.2.6; before, the first check alerted for
+  everything in stock there).
 - **The cycle** (`_cycle`): `fetch_all_products` raises `StoreError` when no category answers (an empty catalog
   read as "no products"); failed categories come back through `error_cb`. Not reaching the store, or a 429/503
   on a category, is `_store_trouble`: said once, "Can't reach the store" in the header, and `_watch_loop` backs off
@@ -137,7 +148,10 @@ to an empty folder is the safe way to run a build.
   `flush(final=True)` (quit, atexit), because marking the file dirty per check rewrote it (≈1 MB) every cycle. The
   file is written unindented; trimming to the cap drops store-wide events first.
 - **Data files** go through `write_json`: a unique `mkstemp` temp name beside the file (the app and the CLI can
-  write at once), fsync, `os.replace` retried for a second on `PermissionError` (antivirus, OneDrive).
+  write at once), fsync, `os.replace` retried for a second on `PermissionError` (antivirus, OneDrive). The watch
+  list's fields are typed on load (`_normalise_watched`), not only on import. A watch list that can't be saved
+  after a change on screen is said in the activity log (`_save_watched`), as settings are: it applies until the
+  app closes.
 - **Notifications** are the tray icon's balloons (Windows shows them as toasts under the app's name); a click
   runs that balloon's callback. Installed copies set the AppUserModelID `JamesCupps.UnifiStockWatcher`, which the
   installer also puts on the Start menu shortcut. The CLI keeps the PowerShell NotifyIcon, with title and text
@@ -145,7 +159,8 @@ to an empty folder is the safe way to run a build.
 - **Phone alerts never log or show an address.** Discord and Slack webhook URLs and ntfy topics *are* the
   secret, and the log goes into bug reports. Messages name `webhooks.label()` (service or host). requests'
   exception text quotes the full URL, so `_attempt` maps exceptions to its own wording; `_refusal` cuts the
-  path out of a service's reply; `load_settings` names an invalid phone setting without its value.
+  path out of a service's reply; `load_settings` names an invalid phone setting without its value. Quitting
+  (and the CLI stopping) waits up to `PHONE_QUIT_WAIT` (3 s) on `Sender.wait()` for alerts still being sent.
 - **ntfy gets JSON at the server's root** with `topic` in the body (JSON posted to the topic's address arrives
   as the message text). Redirects aren't followed (requests would turn the POST into a GET). Each service keeps
   its own keys in settings (`ntfy_url`, `discord_url`, …) so switching services loses nothing. The Settings
@@ -168,7 +183,9 @@ to an empty folder is the safe way to run a build.
   post `WM_SHOW_WINDOW` to it and exit; the CLI's mutex → say so and exit; the mutex gone → take it and start. A
   copy that's still starting holds the mutex seconds before its tray window exists, so the app waits up to
   `OTHER_COPY_WAIT` (30 s) for it; 3.2.1 started a second copy then. The CLI waits 5 s; `--test` and
-  `--version` take no lock. Tests use their own mutex names (`tests/test_single_instance.py`).
+  `--version` take no lock. Tests use their own mutex names (`tests/test_single_instance.py`). The lock's
+  kernel32 is its own typed `WinDLL(..., use_last_error=True)` (`_kernel32()`), read with
+  `ctypes.get_last_error()`: a second foreign call to `GetLastError` isn't promised the first one's value.
 - The tray's window class is registered once per process with one module-level window procedure; a
   per-instance ctypes callback would be called after its TrayIcon was collected.
 - **Screenshots and the locked desktop**: on a locked or undisplayed desktop Windows sends no WM_PAINT for
@@ -182,7 +199,8 @@ to an empty folder is the safe way to run a build.
 - `tests/conftest.py` points `USW_DATA_DIR` at a temp folder before anything imports `unifi_core`, and blocks the
   network (`get_session` and `webhooks.http_post`): a test that reaches for the real store or a webhook fails. `isolated_files` redirects each data file per test.
 - GUI tests share one Tk root (a second Tcl interpreter breaks Tcl's library paths intermittently); the `app`
-  fixture resets state and calls `_rebuild_ui()`. It stubs `check_slug`, whose retries otherwise sleep 3 s
+  fixture resets state (the UI queue too: a test that runs a cycle without pumping leaves its posts there) and
+  calls `_rebuild_ui()`. It stubs `check_slug`, whose retries otherwise sleep 3 s
   against the blocked network and stall the next test's setup.
 - `test_update.py` builds signed release folders with `cryptography` and runs the real download/verify/swap code.
 - `tests_live/` runs nightly in CI (`contract.yml`) and opens an issue labeled `store-contract` when it fails.

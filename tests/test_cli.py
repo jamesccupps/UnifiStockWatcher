@@ -1,6 +1,7 @@
-"""The command-line watcher's alerts (unifi_watcher.py)."""
+"""The command-line watcher (unifi_watcher.py)."""
 
 import unifi_watcher as cli
+from conftest import product
 
 
 class Phone:
@@ -30,3 +31,18 @@ def test_a_price_drop_alerts_only_when_asked(monkeypatch, capsys):
 
     cli.price_changed(settings, phone, None, {**item, "muted": True}, "$259.00", "$249.00", "us")
     assert len(notes) == 1
+
+
+def test_the_first_run_lists_products_with_odd_titles(monkeypatch, capsys, isolated_files):
+    """Review 2026-11-15: a missing or null title ended the setup with a
+    traceback, before anything was watched."""
+    no_title = product("no-title", status="SoldOut")
+    del no_title["title"]
+    monkeypatch.setattr(cli, "get_build_id", lambda *a, **k: "bid")
+    monkeypatch.setattr(cli, "fetch_all_products", lambda *a, **k: [
+        product("named", "Named", status="SoldOut"),
+        dict(product("untitled", status="SoldOut"), title=None), no_title])
+    monkeypatch.setattr("builtins.input", lambda *a: "1, 2, 3")
+    watched = cli.run_setup()
+    assert [w["title"] for w in watched] == ["Named", "no-title", "untitled"]
+    assert "untitled" in capsys.readouterr().out

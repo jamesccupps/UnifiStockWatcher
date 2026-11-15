@@ -86,6 +86,46 @@ def test_find_product_returns_none_when_page_has_no_products():
     assert unifi_core._find_product({}, "nope") is None
 
 
+def test_find_product_skips_entries_that_arent_products():
+    page = {"collection": {"products": [None, "a", 7, product("a")]}, "product": "a"}
+    assert unifi_core._find_product(page, "a")["slug"] == "a"
+
+
+def test_find_product_reads_historical_slugs_only_as_a_list():
+    """A string there matched any slug inside it: u7-pro found u7-pro-max."""
+    page = {"collection": {"products": [product("u7-pro-max", historicalSlugs="u7-pro-max-v1")]}}
+    assert unifi_core._find_product(page, "u7-pro") is None
+
+
+@pytest.mark.parametrize("p, title", [
+    ({"slug": "s", "title": "Dream Machine"}, "Dream Machine"),
+    ({"slug": "s", "title": None}, "s"),
+    ({"slug": "s", "title": ""}, "s"),
+    ({"slug": "s"}, "s"),
+    ({"slug": "s", "title": 7}, "7"),
+    ({}, ""),
+    (None, ""),
+])
+def test_a_products_title_is_always_text(p, title):
+    """Review 2026-11-15: Add products and the CLI's first run sorted and
+    printed p["title"] as it came; one null title failed the whole list."""
+    assert unifi_core.product_title(p) == title
+
+
+@pytest.mark.parametrize("variants, cents", [
+    ([variant(amount=24900)], 24900),
+    ([{"displayPrice": {"amount": "19900"}}, variant(amount=24900)], 24900),
+    ([{"displayPrice": {"amount": 0}}, variant(amount=500)], 500),
+    ([{"price": 199.5}], 19950),
+    ([{"displayPrice": {"amount": True}}], None),
+    (None, None), ("x", None), ([None, 3], None),
+])
+def test_a_products_price_value_is_a_number_or_none(variants, cents):
+    """The Add products price sort: a text amount couldn't be compared with
+    the numbers, and "variants": null raised."""
+    assert unifi_core.price_value({"variants": variants}) == cents
+
+
 # ── redirect handling ────────────────────────────────────────────────────────
 
 def test_redirect_path_strips_query_and_suffix():
@@ -154,6 +194,22 @@ def test_check_slug_never_fabricates_out_of_stock(fake_session):
     }
     with pytest.raises(ProductNotFound):
         unifi_core.check_slug("bid", "weird")
+
+
+@pytest.mark.parametrize("body", [
+    {"pageProps": None}, {"pageProps": "x"}, ["x"],
+    {"pageProps": {"collection": "x"}},
+    {"pageProps": {"collection": {"products": [None, 7]}}},
+])
+def test_a_product_page_in_an_odd_shape_is_answered_at_once(fake_session, monkeypatch, body):
+    """Review 2026-11-15: these raised AttributeError, which read as a network
+    failure: three tries with sleeps, for that product, every cycle."""
+    slept = []
+    monkeypatch.setattr(unifi_core.time, "sleep", slept.append)
+    fake_session.routes = {"/products/odd.json": FakeResponse(200, body)}
+    with pytest.raises(ProductNotFound):
+        unifi_core.check_slug("bid", "odd")
+    assert len(fake_session.calls) == 1 and slept == []
 
 
 def test_check_slug_404_with_unchanged_build_id_means_gone(fake_session, monkeypatch):

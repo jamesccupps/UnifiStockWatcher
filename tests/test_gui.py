@@ -5,6 +5,7 @@ needs xvfb, which the workflow provides. The app runs without its tray icon
 and without update checks here.
 """
 
+import csv
 import logging
 import threading
 import time
@@ -72,6 +73,9 @@ def app(_session_app, isolated_files, monkeypatch):
 
     a = _session_app
     _quiesce(a)
+    # Work an earlier test posted and never pumped (a cycle run directly)
+    # would otherwise land in this one: a row marked DELISTED out of nowhere.
+    a._ui_queue = type(a._ui_queue)()
     a._wake.clear()
     a.watched = []
     a.status = {}
@@ -79,6 +83,7 @@ def app(_session_app, isolated_files, monkeypatch):
     a._prev_status = {}
     a._delisted = {}
     a._store_gen = 0
+    a._store_baseline = set()
     a._store_down = None
     a._failures = 0
     a._partial = None
@@ -188,6 +193,32 @@ def test_changing_region_clears_the_catalog_baseline(app):
     assert unifi_core.load_settings()["region"] == "eu"
 
 
+def _other_region(app):
+    return "eu" if app.settings.get("region", "us") != "eu" else "us"
+
+
+def test_changing_the_store_doesnt_alert_for_what_is_in_stock_there(app, monkeypatch):
+    """Review 2026-11-15: a store change cleared notified, so the first check
+    of the new store alerted for every watched product in stock there. As at
+    start-up, what is in stock is where it starts; the next return alerts."""
+    notes = []
+    monkeypatch.setattr(app, "_notify", lambda *a: notes.append(a))
+    app.watched = items("in", "out")
+    app._refresh_list()
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [
+        product("in"), product("out", status="SoldOut")])
+    app.set_setting("region", _other_region(app))
+    app._cycle()
+    pump(app, 0.2)
+    assert notes == []
+    assert any("won't alert" in m for _, m, _ in app._log_lines)
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: [
+        product("in"), product("out")])
+    app._cycle()
+    pump(app, 0.2)
+    assert [n[0] for n in notes] == ["Back in stock: Out"]
+
+
 def test_same_region_keeps_the_baseline(app):
     app._prev_status = {"s": (True, "T", "$1.00", None)}
     app._on_settings_apply(dict(app.settings))
@@ -294,6 +325,37 @@ def test_closing_without_a_tray_quits_and_flushes(app, monkeypatch):
     assert app._wake.is_set()
     assert flushed == [True]                     # the counters too, on the way out
     assert destroyed == [1]
+
+
+def test_quitting_waits_a_moment_for_phone_alerts(app, monkeypatch):
+    """Review 2026-11-15: an alert raised just before Quit (or before an
+    update restarts the app) was dropped with the sender's thread."""
+    waited = []
+    monkeypatch.setattr(app.phone, "wait", lambda timeout: waited.append(timeout) or True)
+    monkeypatch.setattr(gui.stock_history, "flush", lambda final=False: None)
+    monkeypatch.setattr(type(app), "destroy", lambda self: None)
+    app.tray = None
+    app.quit_app()
+    assert waited == [gui.PHONE_QUIT_WAIT]
+
+
+def test_a_watch_list_that_cant_be_saved_says_so(app, monkeypatch):
+    """Review 2026-11-15: the generic "Something went wrong" dialog, with the
+    change already on screen. Like settings: it applies until the app closes."""
+    def locked(_):
+        raise PermissionError(13, "Access is denied")
+    monkeypatch.setattr(gui, "save_watched", locked)
+    boxes = []
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *a, **k: boxes.append(a))
+    app.watched = items("s")
+    app._refresh_list()
+    app._toggle_fav(app.watched[0])
+    app._toggle_mute(app.watched[0])
+    app._add_items(items("t"))
+    app._remove_item(app.watched[0])
+    assert boxes == [] and [w["slug"] for w in app.watched] == ["t"]
+    said = [m for _, m, _ in app._log_lines if m.startswith("Couldn't save the watch list")]
+    assert len(said) == 4 and "Access is denied" in said[0]
 
 
 def test_closing_with_a_tray_keeps_watching(app, monkeypatch):
@@ -648,6 +710,23 @@ def test_a_delisted_product_is_asked_again_later(app, monkeypatch):
     assert calls == [1, 1]
 
 
+def test_a_quick_check_from_the_old_store_doesnt_mark_a_product_delisted(app, monkeypatch):
+    """Review 2026-11-15: its not-found branch didn't look at the store
+    generation, so a check started before a store change marked the product
+    delisted in the new store."""
+    def gone_after_a_switch(*a, **k):
+        app._store_gen += 1                        # the store changed meanwhile
+        raise unifi_core.ProductNotFound("s")
+    monkeypatch.setattr(gui, "check_slug", gone_after_a_switch)
+    app.watched = items("s")
+    app._refresh_list()
+    app._quick_check_item(app.watched[0])
+    assert pump_until(app, lambda: not any(t.name == "unifi-quick" for t in threading.enumerate()))
+    pump(app, 0.1)
+    assert "s" not in app._delisted
+    assert app.rows["s"].pill.cget("text") != "DELISTED"
+
+
 def test_removing_and_adding_a_delisted_product_looks_it_up_again(app, monkeypatch):
     monkeypatch.setattr(gui, "check_slug", _gone)
     app.watched = items("s")
@@ -903,6 +982,25 @@ def test_the_history_csv_opens_in_excel_with_its_symbols(app, monkeypatch, tmp_p
     app._history_widget._export()
     data = out.read_bytes()
     assert data.startswith(b"\xef\xbb\xbf") and "£279.00".encode() in data
+
+
+def test_the_history_csv_doesnt_start_a_cell_with_a_formula(app, monkeypatch, tmp_path):
+    """Review 2026-11-15: a title starting with = would be a formula in Excel."""
+    gui.stock_history.clear()
+    gui.stock_history.record("a", "=1+2", True, "@price")
+    out = tmp_path / "h.csv"
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", lambda **k: str(out))
+    app._show_tab("history")
+    app._history_widget._export()
+    rows = list(csv.reader(out.read_text(encoding="utf-8-sig").splitlines()))
+    assert rows[1][1] == "'=1+2" and rows[1][4] == "'@price" and rows[1][2] == "a"
+
+
+def test_finish_update_without_its_arguments_says_so(capsys):
+    """Review 2026-11-15: run by hand, it ended in an IndexError."""
+    assert gui.main(["--finish-update"]) == 2
+    assert gui.main(["--finish-update", "C:\\folder", "not-a-pid"]) == 2
+    assert "--finish-update" in capsys.readouterr().err
 
 
 def test_only_a_successful_update_cleans_up(monkeypatch):
@@ -1170,6 +1268,39 @@ def test_browse_search_is_debounced(browse, app):
     assert shown(browse) == ["Bravo"]
 
 
+def test_browse_lists_products_with_odd_titles_and_prices(app, monkeypatch):
+    """Review 2026-11-15: one product with "title": null failed the whole
+    dialog ("Couldn't reach the store: AttributeError"), and a text amount
+    or "variants": null failed the price sort."""
+    catalog = [product("named", "Named", status="SoldOut", amount=30000),
+               dict(product("untitled", status="SoldOut", amount=10000), title=None),
+               dict(product("text-price", "Text Price"),
+                    variants=[{"status": "SoldOut", "displayPrice": {"amount": "19900"}}]),
+               dict(product("no-variants", "No Variants"), variants=None)]
+    for p in catalog:
+        p["_category"] = "category/all-switching"
+    monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: catalog)
+    picks = []
+    d = gui.BrowseDialog(app, [], picks.extend)
+    d.withdraw()
+    try:
+        assert pump_until(app, lambda: d.loaded and d._filter_job is None)
+        assert "Couldn't" not in d.status_lbl.cget("text")
+        d._sort_by("price")
+        assert shown(d) == ["untitled", "Named", "No Variants", "Text Price"]
+        d.q.set("untitled")
+        d._filter()
+        assert shown(d) == ["untitled"]
+        d._toggle("untitled")
+        d._confirm()
+        assert picks[0]["title"] == "untitled"
+    finally:
+        try:
+            d.destroy()
+        except tk.TclError:
+            pass
+
+
 def test_browse_renders_a_full_catalog_quickly(app, monkeypatch):
     catalog = [product(f"p{i}", f"Product {i:03d}", status="SoldOut") for i in range(600)]
     monkeypatch.setattr(gui, "fetch_all_products", lambda *a, **k: catalog)
@@ -1296,6 +1427,31 @@ def test_history_tab_lists_changes(app):
     assert len(h.tree.get_children()) == 3
 
 
+def test_the_history_filter_waits_for_typing_to_stop(app):
+    """Review 2026-11-15: up to 2,000 rows were rebuilt for each key typed."""
+    app._show_tab("history")
+    h = app._history_widget
+    calls = []
+    real = h.refresh
+    h.refresh = lambda: (calls.append(1), real())
+    for text in ("a", "al", "alp"):
+        h.q.set(text)
+    assert calls == []
+    assert pump_until(app, lambda: calls)
+    pump(app, 0.3)
+    assert len(calls) == 1
+
+
+def test_a_history_filter_pending_when_the_tab_is_rebuilt_is_dropped(app, monkeypatch):
+    errors = []
+    monkeypatch.setattr(app, "report_callback_exception", lambda *a: errors.append(a))
+    app._show_tab("history")
+    app._history_widget.q.set("a")
+    app._rebuild_ui()
+    pump(app, 0.4)
+    assert errors == []
+
+
 def test_friendly_time():
     from datetime import datetime
     now = datetime(2026, 10, 28, 18, 0)
@@ -1326,6 +1482,32 @@ def test_a_failed_update_check_is_reported_not_raised(app, monkeypatch):
     assert pump_until(app, lambda: not app.update_busy)
     assert "isn't signed" in app.update_status
     assert app.available_update is None
+
+
+def test_the_daily_update_check_keeps_its_schedule(app, monkeypatch):
+    """Review 2026-11-15: each automatic check scheduled the next, so a timer
+    that found a check or download running, or the setting off, ended them
+    for good: a copy left running for weeks never looked again."""
+    daily, checks = [], []
+    real_after = app.after
+
+    def after(ms, fn=None, *args):
+        if ms == gui.UPDATE_RECHECK_MS:
+            daily.append(fn)
+            return "daily"
+        return real_after(ms, fn, *args)
+    monkeypatch.setattr(app, "after", after)
+    monkeypatch.setattr(updater, "check", lambda: checks.append(1))
+    app.update_busy = True                       # a check or download running
+    app._daily_update_check()
+    app.update_busy = False
+    app.settings["check_updates"] = False        # off for now
+    app._daily_update_check()
+    app.settings["check_updates"] = True
+    app._daily_update_check()
+    assert pump_until(app, lambda: checks and not app.update_busy)
+    assert len(checks) == 1
+    assert daily == [app._daily_update_check] * 3
 
 
 def test_the_tray_menu_reflects_state(app):

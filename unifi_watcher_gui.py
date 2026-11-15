@@ -40,7 +40,7 @@ from unifi_core import (  # noqa: E402
     load_settings, save_settings, product_url, store_home,
     get_build_id, invalidate_build_id, fetch_all_products,
     refresh_category_coverage, effective_categories,
-    is_available, get_price, price_amount, check_slug,
+    is_available, get_price, price_amount, price_value, product_title, check_slug,
     describe_restock, describe_sold_out_for, is_coming_soon,
     load_watched, save_watched, stock_history,
     wants_alert, notify_windows, play_sound, migrate_legacy_files, setup_logging,
@@ -60,6 +60,8 @@ DELISTED_RECHECK = 6 * 3600   # seconds before a delisted product's own page is 
 MAX_BACKOFF = 1800            # the longest wait between checks while the store is out
 TOAST_MERGE = 8               # seconds: alerts this close together share one notification
 UPDATE_RECHECK_MS = 24 * 3600 * 1000
+PHONE_QUIT_WAIT = 3           # seconds Quit waits for phone alerts still being sent
+HISTORY_FILTER_DELAY = 180    # ms after the last key before the History filter runs
 ISSUE_URL = f"{REPO_URL}/issues/new?template=bug_report.yml&version={__version__}"
 SITE_URL = "https://jamesccupps.github.io/UnifiStockWatcher/"
 
@@ -485,7 +487,7 @@ class BrowseDialog(tk.Toplevel):
                 all_ = fetch_all_products(
                     bid, region,
                     progress_cb=lambda p: self._post(_progress, p))
-                self.all_prods = sorted(all_, key=lambda p: p.get("title", "").lower())
+                self.all_prods = sorted(all_, key=lambda p: product_title(p).lower())
                 self._post(self._on_fetched)
             except Exception as ex:
                 # Bind the message now. `ex` is unbound the moment this block
@@ -525,7 +527,7 @@ class BrowseDialog(tk.Toplevel):
         self.filtered = [
             p for p in self.all_prods
             if (show_all or not is_available(p))
-            and (not q or q in p.get("title", "").lower())
+            and (not q or q in product_title(p).lower())
             and (not cat_key or p.get("_category") == cat_key)]
         self._apply_sort()
         self._render()
@@ -554,7 +556,7 @@ class BrowseDialog(tk.Toplevel):
     def _apply_sort(self):
         key, desc = self._sort
         getters = {
-            "product":  lambda p: p.get("title", "").lower(),
+            "product":  lambda p: product_title(p).lower(),
             "category": lambda p: category_label(p.get("_category", "")),
             "price":    lambda p: _price_value(p),
             "status":   lambda p: (is_available(p), self._status_text(p)),
@@ -573,7 +575,7 @@ class BrowseDialog(tk.Toplevel):
                 img = T.image("check_on" if slug in self.selected else "check_off")
                 tags = ("instock",) if is_available(p) else ()
             tree.insert("", "end", iid=slug, image=img, tags=tags, values=(
-                p.get("title", slug), category_label(p.get("_category", "")),
+                product_title(p), category_label(p.get("_category", "")),
                 get_price(p) or "", self._status_text(p)))
         self._count()
 
@@ -623,7 +625,7 @@ class BrowseDialog(tk.Toplevel):
         for p in self.all_prods:
             if p["slug"] in self.selected and p["slug"] not in self.already_watching:
                 picks.append({
-                    "title":     p.get("title", p["slug"]),
+                    "title":     product_title(p)[:200],
                     "slug":      p["slug"],
                     "favourite": False,
                     "price":     get_price(p),
@@ -638,13 +640,9 @@ class BrowseDialog(tk.Toplevel):
 
 
 def _price_value(p):
-    for v in p.get("variants", []):
-        price = v.get("displayPrice") or v.get("price")
-        if isinstance(price, dict) and price.get("amount"):
-            return price["amount"]
-        if isinstance(price, (int, float)) and price:
-            return price * 100
-    return float("inf")
+    """The price column's sort key: unpriced products last."""
+    value = price_value(p)
+    return float("inf") if value is None else value
 
 
 # ── Watched item row ──────────────────────────────────────────────────────────
@@ -770,12 +768,21 @@ class WatchedRow(ttk.Frame):
 
 # ── History tab ───────────────────────────────────────────────────────────────
 
+def _csv_text(value):
+    """A text cell that Excel won't read as a formula: the store's titles go
+    into the CSV as they are, and one starting with = + - or @ would run."""
+    if isinstance(value, str) and value[:1] in ("=", "+", "-", "@", "\t", "\r"):
+        return "'" + value
+    return value
+
+
 class HistoryTab(ttk.Frame):
     """Stock changes: watched products, or everything the store changed."""
 
     def __init__(self, parent, app):
         super().__init__(parent, padding=(app.theme.S(20), app.theme.S(14)))
         self.app, self.T = app, app.theme
+        self._refresh_job = None
         self._build()
 
     def _build(self):
@@ -786,7 +793,7 @@ class HistoryTab(ttk.Frame):
         ttk.Checkbutton(bar, text="  Watched products only", variable=self.watched_only,
                         command=self.refresh).pack(side="left")
         self.q = tk.StringVar()
-        self.q.trace_add("write", lambda *_: self.refresh())
+        self.q.trace_add("write", lambda *_: self._refresh_soon())
         e = ttk.Entry(bar, textvariable=self.q, width=26)
         e.pack(side="left", padx=(S(14), 0))
         placeholder(e, self.q, "Filter by product name", T)
@@ -819,6 +826,20 @@ class HistoryTab(ttk.Frame):
         self.empty = ttk.Label(inner, style="Card.Muted.TLabel", justify="center",
                                text="No stock changes yet.\nThey appear here as the watcher "
                                     "notices products coming into or going out of stock.")
+
+    def _refresh_soon(self):
+        """The filter runs once typing pauses, as Add products' does: each key
+        rebuilt up to 2,000 rows."""
+        # The app's timer, not this tab's: destroying a widget deletes the
+        # Tcl commands of its pending timers, and a rebuild destroys the tab.
+        if self._refresh_job is not None:
+            self.app.after_cancel(self._refresh_job)
+        self._refresh_job = self.app.after(HISTORY_FILTER_DELAY, self._refresh_now)
+
+    def _refresh_now(self):
+        self._refresh_job = None
+        if self.winfo_exists():         # not if a theme change rebuilt the tab meanwhile
+            self.refresh()
 
     def _events(self):
         events = stock_history.get_events(limit=0, watched_only=self.watched_only.get())
@@ -877,9 +898,9 @@ class HistoryTab(ttk.Frame):
                 w = csv.writer(fh)
                 w.writerow(["time", "product", "slug", "in_stock", "price", "watched", "price_was"])
                 for e in reversed(self._events()):
-                    w.writerow([e.get("ts"), e.get("title"), e.get("slug"),
-                                e.get("in_stock"), e.get("price") or "", e.get("watched", True),
-                                e.get("price_was") or ""])
+                    w.writerow([e.get("ts"), _csv_text(e.get("title")), _csv_text(e.get("slug")),
+                                e.get("in_stock"), _csv_text(e.get("price") or ""),
+                                e.get("watched", True), _csv_text(e.get("price_was") or "")])
         except OSError as e:
             messagebox.showerror("Couldn't export", f"Couldn't write {path}:\n\n{e.strerror or e}\n\n"
                                  "If it's open in another program, close it and try again.",
@@ -1236,6 +1257,8 @@ class SettingsTab(ttk.Frame):
         label = self.interval.get()
         seconds = next((s for s, lab in INTERVALS if lab == label), None)
         if seconds is None:
+            # A custom interval from settings.json: interval_label() wrote it
+            # as "N seconds", so its first word is the number.
             seconds = int(label.split()[0])
         self.app.set_setting("poll_interval", seconds)
 
@@ -1311,6 +1334,7 @@ class UnifiWatcherApp(tk.Tk):
         self._delisted      = {}     # slug -> when the store last said it's gone
         self._store_gen     = 0      # bumped when the store changes: a cycle reading
                                      # the old one drops what it found
+        self._store_baseline = set() # slugs not yet seen since the store changed
         self._store_down    = None   # since when no check has reached the store
         self._failures      = 0      # cycles in a row that didn't, for the backoff
         self._partial       = None   # the categories the last check couldn't read
@@ -1354,9 +1378,10 @@ class UnifiWatcherApp(tk.Tk):
         if (self.settings.get("auto_start") or watch_now) and self.watched:
             self.after(500, self._toggle_watch)
 
-        if check_updates and self.settings.get("check_updates") \
-                and updater.install_kind() != "source":
-            self.after(4000, lambda: self.check_for_updates(quiet=True))
+        # The daily check runs for the app's whole life, the setting off or
+        # not: turning it back on then needs no restart.
+        if check_updates and updater.install_kind() != "source":
+            self.after(4000, self._daily_update_check)
 
         self.after(50, self._drain)
         self.bind("<F5>", lambda _: self._force_check())
@@ -1476,6 +1501,11 @@ class UnifiWatcherApp(tk.Tk):
             stock_history.flush(final=True)
         except Exception:
             log.exception("Could not flush stock history on exit")
+        # An alert raised a moment ago (or just before an update restarts the
+        # app) would otherwise go with the sender's thread. A short wait only:
+        # a service that's down is already being retried and may take minutes.
+        if not self.phone.wait(PHONE_QUIT_WAIT):
+            log.warning("Quit with phone alerts still unsent")
         if self.tray:
             self.tray.stop()
             self.tray = None
@@ -1740,12 +1770,18 @@ class UnifiWatcherApp(tk.Tk):
         self._store_gen += 1
         self._prev_status = {}
         self.notified.clear()
+        # The history's last states are the old store's, so there is nothing
+        # to seed `notified` from (as _seed_notified does at start-up). Each
+        # watched product's first check in the new store is its baseline
+        # instead: in stock there is where it starts, not a return.
+        self._store_baseline = {w["slug"] for w in self.watched}
         self._delisted.clear()      # a slug absent from one store may exist in another
         self.status.clear()
         invalidate_build_id()
         self._refresh_list()
         self._log(f"Store changed from {STORE_REGIONS[old]['label']} to "
-                  f"{STORE_REGIONS[new]['label']}: starting a new baseline.", "warn")
+                  f"{STORE_REGIONS[new]['label']}: starting a new baseline. Products already "
+                  "in stock there won't alert; their next return will.", "warn")
 
     def _set_autostart(self, enabled):
         if not winplatform.set_autostart(enabled):
@@ -1821,11 +1857,22 @@ class UnifiWatcherApp(tk.Tk):
 
     # ── Item actions ──────────────────────────────────────────────────
 
+    def _save_watched(self):
+        """Save the watch list after a change that's already on screen. If the
+        file can't be written, say so: like settings, the change applies until
+        the app closes."""
+        try:
+            save_watched(self.watched)
+        except OSError as e:
+            log.warning("Could not save the watch list: %s", e)
+            self._log(f"Couldn't save the watch list ({e.strerror or e}); the change applies "
+                      "until the app closes.", "err")
+
     def _remove_item(self, item):
         self.watched = [w for w in self.watched if w["slug"] != item["slug"]]
         self.status.pop(item["slug"], None)
         self._delisted.pop(item["slug"], None)
-        save_watched(self.watched)
+        self._save_watched()
         self._refresh_list()
         self._log(f"Removed {item['title']}", "warn")
 
@@ -1836,7 +1883,7 @@ class UnifiWatcherApp(tk.Tk):
                 w["favourite"] = not w.get("favourite", False)
                 is_fav = w["favourite"]
                 break
-        save_watched(self.watched)
+        self._save_watched()
         self._refresh_list()
         self._log(f"{item['title']} {'added to' if is_fav else 'removed from'} favorites",
                   "fav" if is_fav else "info")
@@ -1849,17 +1896,18 @@ class UnifiWatcherApp(tk.Tk):
             if w["slug"] == item["slug"]:
                 w["muted"] = muted = not w.get("muted", False)
                 break
-        save_watched(self.watched)
+        self._save_watched()
         self._refresh_list()
         self._log(f"{item['title']}: alerts {'muted' if muted else 'back on'}", "info")
 
     def _quick_check_item(self, item):
         self._log(f"Checking {item['title']}…", "info")
+        # Read here, on the main thread, where a store change happens.
+        gen    = self._store_gen
+        region = self.settings.get("region", "us")
 
         def run():
             try:
-                gen      = self._store_gen
-                region   = self.settings.get("region", "us")
                 build_id = get_build_id(region)
                 in_stock, price = check_slug(build_id, item["slug"], region)
                 if gen != self._store_gen:
@@ -1876,6 +1924,8 @@ class UnifiWatcherApp(tk.Tk):
                 self._prev_status[item["slug"]] = (in_stock, item["title"], price, note)
                 self._maybe_alert(item, in_stock)
             except ProductNotFound:
+                if gen != self._store_gen:
+                    return                  # gone from the old store, not this one
                 self._delisted[item["slug"]] = time.monotonic()
                 self._post(self._mark_delisted, item["slug"], item["title"])
             except Exception as e:
@@ -1892,7 +1942,7 @@ class UnifiWatcherApp(tk.Tk):
         for p in added:
             self._delisted.pop(p["slug"], None)     # added again: look it up again
         self.watched.extend(added)
-        save_watched(self.watched)
+        self._save_watched()
         self._refresh_list()
         self._log(f"Added {len(added)} product(s) to the watch list.", "ok")
         if added and self.watching:
@@ -2059,7 +2109,7 @@ class UnifiWatcherApp(tk.Tk):
                 if not slug:
                     continue
                 try:
-                    current_status[slug] = (is_available(p), str(p.get("title") or slug),
+                    current_status[slug] = (is_available(p), product_title(p),
                                             get_price(p), restock_note(p))
                 except Exception:
                     # One product in a shape the app doesn't know must not
@@ -2147,6 +2197,11 @@ class UnifiWatcherApp(tk.Tk):
         """Alert once per return to stock. Marked here, on the worker, so a
         quick check and a cycle finding it together alert once, not twice."""
         slug = item["slug"]
+        if slug in self._store_baseline:
+            # Its first check since the store changed (_on_region_changed).
+            self._store_baseline.discard(slug)
+            self.notified[slug] = bool(in_stock)
+            return
         if in_stock and not self.notified.get(slug):
             self.notified[slug] = True
             self._post(self._on_in_stock, item)
@@ -2447,9 +2502,15 @@ class UnifiWatcherApp(tk.Tk):
                 u, status = None, f"Couldn't check: {e}"
             self._post(self._on_update_checked, u, status, quiet)
         threading.Thread(target=run, daemon=True, name="unifi-update-check").start()
-        if quiet:
-            self.after(UPDATE_RECHECK_MS, lambda: self.settings.get("check_updates")
-                       and self.check_for_updates(quiet=True))
+
+    def _daily_update_check(self):
+        """The automatic check: once soon after start, then every day. The
+        next one is scheduled first, whatever happens to this one; when the
+        last check scheduled the next, a timer that found a check or download
+        running, or the setting off, ended them until the app restarted."""
+        self.after(UPDATE_RECHECK_MS, self._daily_update_check)
+        if self.settings.get("check_updates") and not self.update_busy:
+            self.check_for_updates(quiet=True)
 
     def _on_update_checked(self, u, status, quiet):
         self.update_busy = False
@@ -2591,8 +2652,14 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if "--finish-update" in argv:
         # The staged copy of a portable update: swap it in, start it, exit.
+        # Only the updater starts it this way; run by hand, say what it needs.
         i = argv.index("--finish-update")
-        return updater.finish_update(argv[i + 1], argv[i + 2])
+        args = argv[i + 1:i + 3]
+        if len(args) < 2 or not args[1].isdigit():
+            print("--finish-update is the updater's: it needs the app's folder and the old "
+                  "copy's process id.", file=sys.stderr)
+            return 2
+        return updater.finish_update(*args)
     if "--version" in argv:
         print(f"{APP_NAME} {__version__}")
         return 0

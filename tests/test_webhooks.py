@@ -309,6 +309,21 @@ def test_the_sender_uses_the_settings_as_they_were(post, monkeypatch):
     assert rec.calls[0][1]["topic"] == "usw-alerts-7f3k"
 
 
+def test_the_sender_can_be_waited_for(monkeypatch):
+    """Quitting waits a moment for alerts still being sent (review 2026-11-15:
+    one raised just before Quit, or before an update's restart, was dropped)."""
+    monkeypatch.setattr(webhooks, "IDLE_EXIT", 0.05)
+    gate = threading.Event()
+    monkeypatch.setattr(webhooks, "send", lambda *a, **k: gate.wait(5) and None)
+    sender = webhooks.Sender()
+    assert sender.wait(0.05) is True               # nothing to send
+    sender.submit(NTFY, alert(), 1)
+    sender.submit(NTFY, alert(), 1)
+    assert sender.wait(0.1) is False               # still sending
+    gate.set()
+    assert sender.wait(5) is True
+
+
 def test_the_sender_survives_an_error_and_ends_when_idle(post, monkeypatch):
     monkeypatch.setattr(webhooks, "IDLE_EXIT", 0.05)
     monkeypatch.setattr(webhooks, "build_request", lambda *a: 1 / 0)

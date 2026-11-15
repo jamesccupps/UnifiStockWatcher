@@ -27,7 +27,7 @@ from unifi_core import (
     ProductNotFound, StoreError,
     load_settings, get_build_id, fetch_all_products,
     refresh_category_coverage, product_url, is_portable,
-    is_available, get_price, price_amount, check_slug,
+    is_available, get_price, price_amount, product_title, check_slug,
     load_watched, save_watched, stock_history,
     wants_alert, notify_windows, play_sound, migrate_legacy_files, setup_logging,
 )
@@ -59,7 +59,7 @@ def run_setup():
 
     out_of_stock = sorted(
         [p for p in all_products if not is_available(p)],
-        key=lambda p: p["title"]
+        key=lambda p: product_title(p).lower()
     )
 
     if not out_of_stock:
@@ -72,7 +72,7 @@ def run_setup():
     print("  " + "-" * 60)
     for i, p in enumerate(out_of_stock, 1):
         price = get_price(p) or ""
-        print(f"  {i:<5} {p['title']:<45} {price}")
+        print(f"  {i:<5} {product_title(p):<45} {price}")
 
     print()
     print("Enter the numbers of items you want to watch,")
@@ -96,7 +96,7 @@ def run_setup():
     for i in picks:
         p = out_of_stock[i - 1]
         watched.append({
-            "title":     p["title"],
+            "title":     product_title(p)[:200],
             "slug":      p["slug"],
             "favourite": False,
             "price":     get_price(p),
@@ -189,6 +189,7 @@ def test_mode():
 
 DELISTED_RECHECK = 6 * 3600     # seconds before a delisted product's page is asked again
 MAX_BACKOFF = 1800              # the longest wait while the store is out
+PHONE_QUIT_WAIT = 3             # seconds a stop waits for phone alerts still being sent
 
 def price_changed(settings, phone, phone_result, item, was, now, region):
     """A watched product's price changed: say so, and alert if it dropped and
@@ -295,41 +296,48 @@ def main():
         elif not in_stock:
             notified[slug] = False
 
-    while True:
-        now = datetime.now().strftime("%H:%M:%S")
-        try:
-            build_id = get_build_id(region)
-            for cat in refresh_category_coverage(build_id, region):
-                print(f"          Store added a category - now watching {cat}")
-            # One catalog fetch per cycle covers every watched item. Asking per
-            # item cost one request each - unthrottled, and growing with the
-            # watch list - for data the catalog already carries.
-            catalog = {p["slug"]: p for p in fetch_all_products(build_id, region)
-                       if p.get("slug")}
-        except Exception as e:
-            # Out or refusing: wait longer each time, up to half an hour.
-            failures += 1
-            wait = min(interval * 2 ** min(failures, 5), max(interval, MAX_BACKOFF))
-            print(f"[{now}]  WARNING: could not reach the store: {e} (trying again in {wait}s)")
-            time.sleep(wait)
-            continue
-        failures = 0
-
-        print(f"[{now}]  Checking…")
-        for item in watched:
-            # One product in an odd shape (or any other surprise) is reported
-            # and skipped: it used to end the watcher.
+    try:
+        while True:
+            now = datetime.now().strftime("%H:%M:%S")
             try:
-                check(item)
+                build_id = get_build_id(region)
+                for cat in refresh_category_coverage(build_id, region):
+                    print(f"          Store added a category - now watching {cat}")
+                # One catalog fetch per cycle covers every watched item. Asking
+                # per item cost one request each - unthrottled, and growing with
+                # the watch list - for data the catalog already carries.
+                catalog = {p["slug"]: p for p in fetch_all_products(build_id, region)
+                           if p.get("slug")}
             except Exception as e:
-                print(f"          WARNING  {item['title']}: couldn't check it ({e})")
+                # Out or refusing: wait longer each time, up to half an hour.
+                failures += 1
+                wait = min(interval * 2 ** min(failures, 5), max(interval, MAX_BACKOFF))
+                print(f"[{now}]  WARNING: could not reach the store: {e} "
+                      f"(trying again in {wait}s)")
+                time.sleep(wait)
+                continue
+            failures = 0
 
-        try:
-            stock_history.flush()
-        except OSError as e:
-            print(f"          WARNING  couldn't save the history: {e}")
-        print(f"          Next check in {interval}s\n")
-        time.sleep(interval)
+            print(f"[{now}]  Checking…")
+            for item in watched:
+                # One product in an odd shape (or any other surprise) is
+                # reported and skipped: it used to end the watcher.
+                try:
+                    check(item)
+                except Exception as e:
+                    print(f"          WARNING  {item['title']}: couldn't check it ({e})")
+
+            try:
+                stock_history.flush()
+            except OSError as e:
+                print(f"          WARNING  couldn't save the history: {e}")
+            print(f"          Next check in {interval}s\n")
+            time.sleep(interval)
+    finally:
+        # Stopped (Ctrl+C): an alert raised a moment ago gets a few seconds
+        # to go out, as when the app quits.
+        if not phone.wait(PHONE_QUIT_WAIT):
+            print("          WARNING  stopped with phone alerts still unsent")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

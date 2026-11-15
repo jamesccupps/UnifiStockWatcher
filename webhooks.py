@@ -299,13 +299,22 @@ class Sender:
     def __init__(self):
         self._queue = queue.Queue()
         self._lock = threading.Lock()
+        self._idle = threading.Condition(self._lock)
+        self._pending = 0            # submitted and not finished yet
         self._thread = None
+
+    def wait(self, timeout):
+        """Wait up to `timeout` seconds for every alert submitted so far to be
+        sent or given up on. True if none is left."""
+        with self._idle:
+            return self._idle.wait_for(lambda: self._pending == 0, timeout)
 
     def submit(self, settings, alert, attempts=ATTEMPTS, on_result=None):
         # A copy of the settings as they are now: the user may be typing a
         # new address while this one is still being retried.
         job = ({k: settings.get(k, "") for k in PHONE_KEYS}, alert, attempts, on_result)
         with self._lock:
+            self._pending += 1
             self._queue.put(job)
             if self._thread is None:
                 self._thread = threading.Thread(target=self._run, name="webhook-sender",
@@ -331,3 +340,6 @@ class Sender:
                     on_result(label(settings), reason)
                 except Exception:
                     pass
+            with self._idle:
+                self._pending -= 1
+                self._idle.notify_all()

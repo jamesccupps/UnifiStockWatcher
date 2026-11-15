@@ -270,12 +270,33 @@ def refresh_autostart():
 
 # ── Single instance ──────────────────────────────────────────────────────────
 
+_K32 = None
+
+
+def _kernel32():
+    """kernel32 for the lock: its own instance, typed, with use_last_error so
+    ctypes saves the thread's last error right after each call
+    (ctypes.get_last_error). GetLastError called as a second foreign call
+    isn't promised to see the first one's, and that value decides whether a
+    second copy starts."""
+    global _K32
+    if _K32 is None:
+        k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        k32.CreateMutexW.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32.OpenMutexW.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+        k32.OpenMutexW.restype = wintypes.HANDLE
+        k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        k32.CloseHandle.restype = wintypes.BOOL
+        _K32 = k32
+    return _K32
+
+
 def _mutex_exists(name):
     """Whether some process holds a mutex of this name."""
     if not IS_WINDOWS:
         return False
-    k32 = ctypes.windll.kernel32
-    k32.OpenMutexW.restype = wintypes.HANDLE
+    k32 = _kernel32()
     h = k32.OpenMutexW(SYNCHRONIZE, False, name)
     if not h:
         return False
@@ -313,10 +334,9 @@ class SingleInstance:
     def _acquire(self):
         if not IS_WINDOWS:
             return
-        k32 = ctypes.windll.kernel32
-        k32.CreateMutexW.restype = wintypes.HANDLE
+        k32 = _kernel32()
         self.handle = k32.CreateMutexW(None, False, MUTEX_NAME)
-        self.already_running = k32.GetLastError() == ERROR_ALREADY_EXISTS
+        self.already_running = ctypes.get_last_error() == ERROR_ALREADY_EXISTS
         if self.already_running:
             # Keep no handle to it: the mutex then goes when the other copy
             # does, which is how wait_for_other sees it go.
@@ -358,5 +378,5 @@ class SingleInstance:
         for attr in ("handle", "marker"):
             h = getattr(self, attr)
             if h:
-                ctypes.windll.kernel32.CloseHandle(h)
+                _kernel32().CloseHandle(h)
                 setattr(self, attr, None)

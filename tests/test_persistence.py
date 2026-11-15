@@ -217,6 +217,20 @@ def test_normalise_fills_optional_fields():
                     "price": None, "added_at": None}
 
 
+def test_the_watch_lists_fields_are_typed_on_load(isolated_files):
+    """Review 2026-11-15: only an import typed them, so a hand-edited file put
+    a number in a title, which then went to the labels and the alerts."""
+    write(unifi_core.CONFIG_FILE, [
+        {"slug": "a", "title": 5, "favourite": 1, "muted": 0, "price": 12, "added_at": 3},
+        {"slug": "b", "title": None, "price": "$1.00", "added_at": "2026-11-15T09:00:00"},
+        {"slug": "c", "title": "x" * 300, "extra": "kept"}])
+    a, b, c = unifi_core.load_watched()
+    assert (a["title"], a["favourite"], a["muted"], a["price"], a["added_at"]) == \
+        ("5", True, False, None, None)
+    assert (b["title"], b["price"], b["added_at"]) == ("b", "$1.00", "2026-11-15T09:00:00")
+    assert len(c["title"]) == 200 and c["extra"] == "kept"
+
+
 @pytest.mark.parametrize("item, settings, alert, phone", [
     ({}, {}, True, True),
     ({"muted": True}, {}, False, False),
