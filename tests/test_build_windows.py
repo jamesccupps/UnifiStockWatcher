@@ -161,6 +161,27 @@ def test_the_signed_files_are_tested_before_anything_is_signed_or_published():
     assert "pattern: release-*" in js["publish"] and "name: program-build" in js["build"]
 
 
+def setup_pythons(job):
+    """The Python versions a job's setup-python steps ask for."""
+    return re.findall(r'^\s+python-version: "([0-9.]+)"\s*$', job, re.M)
+
+
+def test_the_release_and_cis_build_use_one_python():
+    """The release's Python is the one every download bundles. CI's build and signing rehearsal
+    use that same version, the test matrix includes it, and the third-party notices name it."""
+    release = {name: setup_pythons(job) for name, job in jobs(RELEASE).items() if "setup-python" in job}
+    assert set(release) == {"build", "authenticode", "verify", "sign"}
+    versions = {v for found in release.values() for v in found}
+    assert len(versions) == 1, release
+    (version,) = versions
+    ci = jobs((ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8"))
+    for name in ("package", "sign"):
+        assert setup_pythons(ci[name]) == [version], name
+    assert f'"{version}"' in re.search(r"python-version: \[(.*)\]", ci["test"]).group(1)
+    notices = (ROOT / "THIRD-PARTY-NOTICES.md").read_text(encoding="utf-8")
+    assert f"[Python](https://www.python.org/) {version} and its standard library" in notices
+
+
 def test_a_signtest_tag_is_never_published():
     js = jobs(RELEASE)
     for name in ("sign", "publish"):

@@ -6,7 +6,7 @@ app's own code is under the MIT license in [LICENSE](LICENSE).
 
 | Component | What it's for | License |
 |---|---|---|
-| [Python](https://www.python.org/) 3.13 and its standard library | the runtime | [PSF License 2.0](https://docs.python.org/3/license.html) |
+| [Python](https://www.python.org/) 3.14 and its standard library | the runtime | [PSF License 2.0](https://docs.python.org/3/license.html) |
 | [Tcl/Tk](https://www.tcl.tk/) 8.6 (tkinter) | the window and its widgets | [Tcl/Tk license](https://www.tcl.tk/software/tcltk/license.html) (BSD-style) |
 | [OpenSSL](https://www.openssl.org/) 3, as built into Python | HTTPS | [Apache 2.0](https://www.openssl.org/source/license.html) |
 | [libffi](https://sourceware.org/libffi/), as built into Python | ctypes (Windows integration) | MIT |

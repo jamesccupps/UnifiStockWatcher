@@ -2,6 +2,15 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased
+
+### Changed
+
+- The Windows downloads bundle Python 3.14 instead of 3.13. Since October 2026, 3.13 has received only
+  security fixes; 3.14 gets bug fixes until October 2027. Tcl/Tk is still 8.6 and OpenSSL is still 3.0. The
+  release jobs, CI's build and signing rehearsal, and the nightly store check all use 3.14. A test keeps the
+  release's Python, CI's and the third-party notices in step.
+
 ## v3.2.7
 
 ### Changed

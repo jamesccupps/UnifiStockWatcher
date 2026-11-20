@@ -43,8 +43,9 @@ pwsh scripts/test_update.ps1 [-Kinds portable]  # the previous release updating 
 python scripts/make_icons.py         # redraw assets\*.ico / icon.png (committed; builds never run this)
 ```
 
-Run the suite after any change. Python on the development PC: `py -3.13` (the `python` on PATH there is
-Inkscape's 3.11). Never start the app from a Claude session expecting it to persist: children of the Claude
+Run the suite after any change. Python on the development PC: `py -3.13`, which has the requirements installed
+(the `python` on PATH there is Inkscape's 3.11). Releases build with 3.14, which is also there (`py -3.14`) but
+has no requirements installed. Never start the app from a Claude session expecting it to persist: children of the Claude
 desktop app live in its container and die with it. `UnifiStockWatcher.exe --self-test` with `USW_DATA_DIR` set
 to an empty folder is the safe way to run a build.
 
@@ -255,6 +256,13 @@ creation (SourceForge's GitHub sync doesn't see files added later). Installed co
 dependencies never run where the key or the code-signing identity is. CI's `sign` job rehearses the signing job
 on every build with a throwaway key (`update_test_helper.py key`, `verify_release.py --public-key`).
 `tests/test_build_windows.py` holds the workflow to this.
+
+**The release's Python** is what every download bundles: 3.14 since the release after 3.2.7 (3.13 before). The
+version is set in four places that must change together: the release jobs, CI's `package` and `sign` jobs,
+`contract.yml`, and THIRD-PARTY-NOTICES.md. `test_build_windows.py` checks that they match and that the test
+matrix includes the version. Before moving to a new version, check three things: PyInstaller
+(`requirements-dev.txt`) supports it, `requirements-sign.txt`'s hashes include wheels for it on Linux, and the
+Tcl/Tk and OpenSSL it ships, which the notices name.
 
 A tag `vX.Y.Z-signtest.N` (X.Y.Z = `__version__`) runs build, authenticode and verify and publishes nothing:
 for trying a code-signing change. Delete it afterwards (`git push origin :refs/tags/<tag>`). The signature
