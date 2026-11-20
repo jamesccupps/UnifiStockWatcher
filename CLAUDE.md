@@ -125,7 +125,7 @@ to an empty folder is the safe way to run a build.
   on a category (`is_refusal`), is `_store_trouble`: said once, "Can't reach the store" in the header, and
   `_watch_loop` backs off (interval × 2^failures, up to `MAX_BACKOFF`); a refusing store is never asked product by
   product. With categories missing, the baseline is merged, not replaced. The CLI's `Watcher.cycle()` does the
-  same and returns the wait; until it shared `is_refusal` (after 3.2.6) it asked a refusing store for every
+  same and returns the wait; until it shared `is_refusal` (3.2.7) it asked a refusing store for every
   missing product, every check. Products are parsed defensively (`_variants`,
   `_objects`, numeric `amount` only) and each in its own try. `_store_gen` is bumped on a store change: a
   cycle or quick check that sees it change drops its results. Stop ends a watch-loop cycle at the next product;

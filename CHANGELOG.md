@@ -2,7 +2,7 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
-## Unreleased
+## v3.2.7
 
 ### Changed
 

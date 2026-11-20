@@ -24,7 +24,7 @@ try:
 except ImportError:
     REQUESTS_OK = False
 
-__version__ = "3.2.6"
+__version__ = "3.2.7"
 
 APP_NAME = "UniFi Stock Watcher"
 APP_ID   = "JamesCupps.UnifiStockWatcher"     # AppUserModelID, winget id
