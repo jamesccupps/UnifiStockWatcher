@@ -43,11 +43,14 @@ pwsh scripts/test_update.ps1 [-Kinds portable]  # the previous release updating 
 python scripts/make_icons.py         # redraw assets\*.ico / icon.png (committed; builds never run this)
 ```
 
-Run the suite after any change. Python on the development PC: `py -3.13`, which has the requirements installed
-(the `python` on PATH there is Inkscape's 3.11). Releases build with 3.14, which is also there (`py -3.14`) but
-has no requirements installed. Never start the app from a Claude session expecting it to persist: children of the Claude
-desktop app live in its container and die with it. `UnifiStockWatcher.exe --self-test` with `USW_DATA_DIR` set
-to an empty folder is the safe way to run a build.
+Run the suite after any change. Python on the development PC: `py -3.14`, the version releases build with.
+`py -3.13` works too, and both have the requirements installed. The `python` on PATH there is Inkscape's 3.11.
+Both are shared installs that other projects use, so their requests and certifi can be older than CI's. Before
+building a release by hand, upgrade them: `py -3.14 -m pip install -U requests certifi`.
+
+Never start the app from a Claude session expecting it to persist: children of the Claude desktop app live in
+its container and die with it. `UnifiStockWatcher.exe --self-test` with `USW_DATA_DIR` set to an empty folder is
+the safe way to run a build.
 
 ## Layout
 
@@ -225,9 +228,9 @@ to an empty folder is the safe way to run a build.
   ended. It expects `update.log` "update: done" (portable) or Installed apps at the new version (installed),
   "Updated to X.Y.Z." in the new copy's log, one copy running, the watch list unchanged and no `.old` left. The
   frozen N isn't what runs the updater (it has no headless Install), but its files, mutex and process are real,
-  and the new copy's swap or installer is. Locally: `py -3.13 scripts\build_windows.py --no-installer --no-sign`
+  and the new copy's swap or installer is. Locally: `py -3.14 scripts\build_windows.py --no-installer --no-sign`
   (without `--no-sign` a local build signs `dist\latest.json` with the real key: delete it after), then
-  `powershell -File scripts\test_update.ps1 -Kinds portable -Python <py 3.13's python.exe>`.
+  `powershell -File scripts\test_update.ps1 -Kinds portable -Python <py 3.14's python.exe>`.
 
 ## Releasing
 
