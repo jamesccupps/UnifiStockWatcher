@@ -35,6 +35,11 @@ class FakeResponse:
             raise ValueError("No JSON object could be decoded")
         return self._json
 
+    @property
+    def content(self):
+        return json.dumps(self._json).encode() if self._json is not None \
+            else self.text.encode()
+
     def raise_for_status(self):
         if 400 <= self.status_code < 600:
             err = unifi_core.requests.exceptions.HTTPError(
@@ -50,9 +55,11 @@ class FakeSession:
         self.routes = routes or {}
         self.default = default
         self.calls = []
+        self.headers = []           # each request's extra headers, in order
 
     def get(self, url, **kwargs):
         self.calls.append(url)
+        self.headers.append(kwargs.get("headers") or {})
         # Longest fragment first: a canonical product URL contains the bare
         # /products/<slug>.json fragment too, and matching that first would
         # loop a redirect test back onto its own starting point.
@@ -101,6 +108,9 @@ def no_network(monkeypatch):
             "into tests_live/")
     monkeypatch.setattr(unifi_core, "get_session", blocked)
     monkeypatch.setattr(webhooks, "http_post", blocked)
+    # Category pages a test's fake store sent with an ETag must not answer
+    # for the next test's.
+    unifi_core.forget_pages()
 
 
 def variant(status="Available", amount=19900, currency="USD", **extra):

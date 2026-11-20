@@ -369,10 +369,10 @@ def _oos(**variant_extra):
 
 
 def test_parse_ts_accepts_trailing_z():
-    """Python 3.10's fromisoformat rejects Z, and CI covers 3.10."""
+    """Python 3.10's fromisoformat rejected Z."""
     got = unifi_core._parse_ts("2026-08-06T14:50:25.663Z")
     assert got.tzinfo is not None
-    assert got.year, got.month == (2026, 8)
+    assert (got.year, got.month) == (2026, 8)
 
 
 def test_parse_ts_accepts_a_bare_date():
@@ -480,6 +480,99 @@ def test_category_following_a_redirect_still_returns_products(fake_session):
     }
     found = unifi_core._fetch_category("bid", "us", "category/old-name")
     assert sorted(found) == ["cam-1", "cam-2"]
+
+
+class ConditionalPage:
+    """A category page that answers If-None-Match the way the store does:
+    304 and no body while its ETag still matches."""
+
+    def __init__(self, session, page, etag="v1"):
+        self.session, self.page, self.etag = session, page, etag
+
+    def __call__(self, url):
+        if self.session.headers[-1].get("If-None-Match") == self.etag:
+            return FakeResponse(304)
+        return FakeResponse(200, self.page, headers={"ETag": self.etag})
+
+
+def test_an_unchanged_category_page_isnt_downloaded_again(fake_session):
+    """Every check downloaded every page: ~430 KB a check, ~600 MB a day at
+    the default minute, almost all of it unchanged."""
+    fake_session.default = ConditionalPage(
+        fake_session, category_page(product("a"), product("b", status="SoldOut")))
+    fake_session.routes = {"/category/": fake_session.default}
+    first = unifi_core._fetch_category("bid", "us", "category/all-wifi")
+    second = unifi_core._fetch_category("bid", "us", "category/all-wifi")
+    assert fake_session.headers == [{}, {"If-None-Match": "v1"}]
+    assert {s: unifi_core.is_available(p) for s, p in second.items()} == \
+        {s: unifi_core.is_available(p) for s, p in first.items()} == {"a": True, "b": False}
+    assert second["a"]["_category"] == "category/all-wifi"
+    assert second["a"] is not first["a"]          # each check gets products of its own
+
+
+def test_a_changed_category_page_is_read_afresh(fake_session):
+    page = ConditionalPage(fake_session, category_page(product("a", status="SoldOut")))
+    fake_session.routes = {"/category/": page}
+    assert not unifi_core.is_available(unifi_core._fetch_category("bid", "us", "category/x")["a"])
+    page.page, page.etag = category_page(product("a")), "v2"
+    assert unifi_core.is_available(unifi_core._fetch_category("bid", "us", "category/x")["a"])
+    # ...and the new copy is the one kept.
+    assert unifi_core.is_available(unifi_core._fetch_category("bid", "us", "category/x")["a"])
+    assert [h.get("If-None-Match") for h in fake_session.headers] == [None, "v1", "v2"]
+
+
+def test_a_kept_category_page_is_downloaded_whole_again_after_a_while(fake_session, monkeypatch):
+    """A store that wrongly said "not modified" could only hide a change for
+    PAGE_REFRESH."""
+    fake_session.routes = {"/category/": ConditionalPage(fake_session, category_page(product("a")))}
+    unifi_core._fetch_category("bid", "us", "category/x")
+    monkeypatch.setattr(unifi_core, "PAGE_REFRESH", 0)
+    unifi_core._fetch_category("bid", "us", "category/x")
+    assert fake_session.headers == [{}, {}]
+
+
+def test_a_kept_category_page_answers_for_its_build_only(fake_session):
+    fake_session.routes = {"/category/": ConditionalPage(fake_session, category_page(product("a")))}
+    unifi_core._fetch_category("bid", "us", "category/x")
+    unifi_core._fetch_category("bid-2", "us", "category/x")
+    assert fake_session.headers == [{}, {}]
+
+
+def test_a_category_page_without_an_etag_isnt_kept(fake_session):
+    fake_session.routes = {"/category/": FakeResponse(200, category_page(product("a")))}
+    unifi_core._fetch_category("bid", "us", "category/x")
+    unifi_core._fetch_category("bid", "us", "category/x")
+    assert fake_session.headers == [{}, {}]
+
+
+def test_not_modified_for_a_page_never_downloaded_is_an_error(fake_session):
+    fake_session.routes = {"/category/": FakeResponse(304)}
+    with pytest.raises(StoreError, match="304"):
+        unifi_core._fetch_category("bid", "us", "category/x")
+
+
+def test_a_renamed_category_is_kept_under_its_new_name(fake_session):
+    new = ConditionalPage(fake_session, category_page(product("cam-1")))
+    fake_session.routes = {
+        "/category/old-name.json": FakeResponse(
+            200, {"pageProps": {"__N_REDIRECT": "/us/en/category/new-name"}}),
+        "/category/new-name.json": new,
+    }
+    unifi_core._fetch_category("bid", "us", "category/old-name")
+    found = unifi_core._fetch_category("bid", "us", "category/old-name")
+    assert list(found) == ["cam-1"]
+    assert [h.get("If-None-Match") for h in fake_session.headers] == [None, None, None, "v1"]
+
+
+def test_only_429_and_503_are_the_store_refusing():
+    def failed(status):
+        e = unifi_core.requests.exceptions.HTTPError(f"{status}")
+        e.response = FakeResponse(status)
+        return e
+    assert unifi_core.is_refusal(failed(429)) and unifi_core.is_refusal(failed(503))
+    assert not unifi_core.is_refusal(failed(500))
+    assert not unifi_core.is_refusal(unifi_core.requests.exceptions.ConnectionError("down"))
+    assert not unifi_core.is_refusal(StoreError("odd page"))
 
 
 def test_category_redirecting_off_the_category_space_is_empty(fake_session):

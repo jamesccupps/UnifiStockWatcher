@@ -76,7 +76,7 @@ That's the portable zip, with a Start menu shortcut and `UnifiStockWatcher-cli` 
 list and settings in `%APPDATA%\UniFi Stock Watcher`, like the installer, so `scoop update unifistockwatcher` keeps
 them; the app's own updates work too.
 
-**From source:** Python 3.10 or newer, then `pip install -r requirements.txt` and `python unifi_watcher_gui.py`
+**From source:** Python 3.11 or newer, then `pip install -r requirements.txt` and `python unifi_watcher_gui.py`
 (or double-click `install_and_run.bat`).
 
 ## Use
@@ -168,7 +168,9 @@ The `favourite` key keeps the spelling it has always had, so automations built o
 The app talks to two places, and a third if you ask it to:
 
 - `store.ui.com`, to read the catalog: one check is 8 requests, at the interval you choose (1 minute by default,
-  never faster than 15 seconds), and less often while the store isn't answering. Every 5 minutes it also reads
+  never faster than 15 seconds), and less often while the store isn't answering. A page that hasn't changed since
+  the last check isn't downloaded again (the store answers *not modified*), so most checks are a few kilobytes
+  rather than about 430 KB; each page is downloaded whole at least every 10 minutes. Every 5 minutes it also reads
   the store's home page for the site's current build, and once a day to notice new product categories.
 - GitHub, once a day, for this project's `latest.json` (turn it off in **Settings → Updates**). Nothing is
   downloaded until you click **Install**. Installed copies then run the new installer silently and restart;
@@ -219,11 +221,12 @@ folder too if you don't need them. A portable copy: delete its folder. Scoop: `s
 
 The store is a Next.js site. The app reads its `buildId` from the home page (cached for five minutes, per store),
 then the category pages' data at `/_next/data/{buildId}/{region}/category/....json`, concurrently over one pooled
-connection, and reads each product's variant `status` (`Available`, `SoldOut`, `ComingSoon`), price, and
-`restockEtaAt` / `soldOutAt`. A product the category pages don't carry is looked up by its own page, which for
-about half the catalog answers HTTP 200 with a redirect *in the body* (`__N_REDIRECT`) or a bare 307 with
-`x-nextjs-redirect`; the app follows both and picks the product by slug, `historicalSlugs`, then
-`currentProductId`, and says *delisted* rather than guessing when nothing matches.
+connection (each with the ETag of the copy it read last, so an unchanged page is a `304` with no body), and reads
+each product's variant `status` (`Available`, `SoldOut`, `ComingSoon`), price, and `restockEtaAt` / `soldOutAt`.
+A product the category pages don't carry is looked up by its own page, which for about half the catalog answers
+HTTP 200 with a redirect *in the body* (`__N_REDIRECT`) or a bare 307 with `x-nextjs-redirect`; the app follows
+both and picks the product by slug, `historicalSlugs`, then `currentProductId`, and says *delisted* rather than
+guessing when nothing matches.
 
 Ubiquiti renames categories now and then (cameras moved from `all-cameras-nvrs` to `all-physical-security`), so
 category fetches follow the store's redirects, and once a day the app adopts any new category that carries
@@ -240,7 +243,7 @@ python scripts/demo.py                 # the app against a pretend store
 python scripts/build_windows.py        # dist\: the program folder, the zip, and with Inno Setup 6 the installer
 ```
 
-CI runs the suite on Windows and Linux for Python 3.10 to 3.14, then builds the Windows release files, runs the
+CI runs the suite on Windows and Linux for Python 3.11 to 3.15, then builds the Windows release files, runs the
 built app's self-test, and installs, self-tests and uninstalls the installer. A version tag (`v3.0.0`) builds,
 signs and publishes the release. [CLAUDE.md](CLAUDE.md) has the architecture, the release process and what was
 learned along the way; [ROADMAP.md](ROADMAP.md) what's planned.

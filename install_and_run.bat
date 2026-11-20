@@ -16,7 +16,7 @@ if errorlevel 1 set "PY=python"
 %PY% --version >nul 2>&1
 if errorlevel 1 (
     echo ERROR: Python not found.
-    echo Please install Python 3.10+ from https://python.org
+    echo Please install Python 3.11+ from https://python.org
     echo Or download the ready-made app, no Python needed:
     echo   https://github.com/jamesccupps/UnifiStockWatcher/releases/latest
     echo.

@@ -1484,6 +1484,78 @@ def test_a_failed_update_check_is_reported_not_raised(app, monkeypatch):
     assert app.available_update is None
 
 
+def offer_update(app, kind="portable"):
+    app.available_update = updater.Update(
+        "9.9.9", None, kind, {"file": "x", "size": 1, "sha256": "0" * 64}, "src")
+    app._refresh_update_ui()
+
+
+def test_install_downloads_starts_the_update_and_quits(app, monkeypatch, tmp_path):
+    """The Install button's own code: CI's update test drives the previous
+    version's updater.py, never this."""
+    offer_update(app)
+    steps, quits, statuses = [], [], []
+
+    def download(u, progress=None):
+        progress(1, 2)
+        steps.append(("download", app.update_status))
+        return tmp_path / "UnifiStockWatcher-win64.zip"
+    monkeypatch.setattr(updater, "download", download)
+    monkeypatch.setattr(updater, "apply", lambda u, path: steps.append(("apply", path.name)))
+    monkeypatch.setattr(app, "quit_app", lambda: quits.append(app.update_status))
+    real_refresh = app._refresh_update_ui
+    monkeypatch.setattr(app, "_refresh_update_ui",
+                        lambda: (statuses.append(app.update_status), real_refresh()))
+    monkeypatch.setattr(app, "watching", True)
+
+    app.install_update()
+    assert app.update_busy
+    app.install_update()                                    # a second click does nothing
+    assert pump_until(app, lambda: quits)
+    assert steps == [("download", "Downloading 9.9.9… 50%"),
+                     ("apply", "UnifiStockWatcher-win64.zip")]
+    assert quits == ["Installing 9.9.9…"]
+    assert statuses[0] == "Downloading 9.9.9…"
+    # Watching again once the new version starts (_after_update reads it).
+    assert gui.load_settings()["resume_watching"] is True
+
+
+@pytest.mark.parametrize("fails", ["download", "apply"])
+def test_an_update_that_doesnt_install_says_so_and_can_be_tried_again(app, monkeypatch, fails,
+                                                                      tmp_path):
+    offer_update(app)
+    attempts, errors, quits = [], [], []
+
+    def step(name):
+        def run(*a, **k):
+            attempts.append(name)
+            if name == fails:
+                raise updater.UpdateError(f"{name} went wrong")
+            return tmp_path / "x.zip"
+        return run
+    monkeypatch.setattr(updater, "download", step("download"))
+    monkeypatch.setattr(updater, "apply", step("apply"))
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda title, msg, **k: errors.append(msg))
+    monkeypatch.setattr(app, "quit_app", lambda: quits.append(1))
+
+    app.install_update()
+    assert pump_until(app, lambda: errors)
+    assert not app.update_busy and quits == []
+    assert app.update_status == f"The update didn't install: {fails} went wrong"
+    assert errors == [f"The update didn't install:\n\n{fails} went wrong"]
+    app.install_update()
+    assert pump_until(app, lambda: len(errors) == 2)
+    assert attempts.count("download") == 2
+
+
+def test_install_does_nothing_without_an_update_it_can_install(app, monkeypatch):
+    monkeypatch.setattr(updater, "download", lambda *a, **k: pytest.fail("downloaded"))
+    app.install_update()
+    app.available_update = updater.Update("9.9.9", None, "source", None, "src")
+    app.install_update()
+    assert not app.update_busy
+
+
 def test_the_daily_update_check_keeps_its_schedule(app, monkeypatch):
     """Review 2026-11-15: each automatic check scheduled the next, so a timer
     that found a check or download running, or the setting off, ended them

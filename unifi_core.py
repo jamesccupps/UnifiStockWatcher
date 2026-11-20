@@ -171,6 +171,7 @@ STORE_REGIONS = {
 STORE_BASE = "https://store.ui.com"
 MAX_REDIRECTS = 4
 CATEGORY_WORKERS = 4
+PAGE_REFRESH = 600          # seconds a kept category page may answer "not modified" before a full download
 CATEGORY_DISCOVERY_TTL = 24 * 3600   # re-check the store's category list daily
 
 # Category slugs the store actually serves today. These get renamed - cameras
@@ -605,6 +606,38 @@ def _objects(value):
     return [x for x in value if isinstance(x, dict)] if isinstance(value, list) else []
 
 
+# Category pages as last downloaded: path -> (build id, ETag, body, when).
+# The store answers a request carrying the ETag with 304 and no body when the
+# page hasn't changed. Downloading every page every check came to ~430 KB
+# (3.7 MB of JSON) a check: ~600 MB a day at the default minute. The body is
+# kept, not the parsed products: a few MB rather than tens, and each check
+# still gets products of its own.
+_pages = {}
+_pages_lock = threading.Lock()
+
+
+def _kept_page(build_id, path):
+    """(ETag, body) of the page kept for this build, or None. A page older
+    than PAGE_REFRESH is downloaded whole again, so a store that answered 304
+    wrongly could only hide a change for that long."""
+    with _pages_lock:
+        kept = _pages.get(path)
+    if kept and kept[0] == build_id and time.monotonic() - kept[3] < PAGE_REFRESH:
+        return kept[1], kept[2]
+    return None
+
+
+def _keep_page(build_id, path, etag, body):
+    with _pages_lock:
+        _pages[path] = (build_id, etag, body, time.monotonic())
+
+
+def forget_pages():
+    """Drop the kept category pages: the next check downloads them all."""
+    with _pages_lock:
+        _pages.clear()
+
+
 def _fetch_category(build_id, region, cat):
     """Fetch one category page. Returns {slug: product}.
 
@@ -616,23 +649,33 @@ def _fetch_category(build_id, region, cat):
 
     A 404 usually means the buildId rotated between the homepage fetch and
     this call, so refresh it once and retry with the new id.
+
+    A page downloaded before is asked for with its ETag; "not modified" (304)
+    reads the kept copy (`_kept_page`).
     """
     path = f"/{STORE_REGIONS[region]['path']}/{cat}"
     found = {}
     refreshed = False
 
     for _ in range(MAX_REDIRECTS):
+        kept = _kept_page(build_id, path)
         try:
-            r = get_session().get(_data_url(build_id, path), timeout=15)
-            if r.status_code in (301, 302, 303, 307, 308):
-                loc = r.headers.get("Location") or r.headers.get("x-nextjs-redirect")
-                if not loc:
-                    raise StoreError(
-                        f"{cat}: {r.status_code} with no redirect target")
-                path = urlsplit(loc).path.removesuffix(".json")
-                continue
-            r.raise_for_status()
-            data = r.json()
+            r = get_session().get(_data_url(build_id, path), timeout=15,
+                                  headers={"If-None-Match": kept[0]} if kept else None)
+            if r.status_code == 304:
+                if not kept:
+                    raise StoreError(f"{cat}: 304 for a page that wasn't asked about")
+                data = json.loads(kept[1])
+            else:
+                if r.status_code in (301, 302, 303, 307, 308):
+                    loc = r.headers.get("Location") or r.headers.get("x-nextjs-redirect")
+                    if not loc:
+                        raise StoreError(
+                            f"{cat}: {r.status_code} with no redirect target")
+                    path = urlsplit(loc).path.removesuffix(".json")
+                    continue
+                r.raise_for_status()
+                data = r.json()
             page_props = data.get("pageProps") if isinstance(data, dict) else None
             if not isinstance(page_props, dict):
                 raise StoreError(f"{cat}: the page has no product data")
@@ -670,6 +713,9 @@ def _fetch_category(build_id, region, cat):
             if isinstance(p.get("slug"), str) and p["slug"]:
                 p.setdefault("_category", cat)
                 found.setdefault(p["slug"], p)
+        etag = r.headers.get("ETag")
+        if r.status_code == 200 and etag:
+            _keep_page(build_id, path, etag, r.content)
         return found
 
     raise StoreError(f"{cat}: too many redirects (>{MAX_REDIRECTS})")
@@ -720,6 +766,12 @@ def fetch_all_products(build_id, region="us", progress_cb=None, error_cb=None):
     log.info("Fetched %d unique products across %d categories",
              len(products), len(cats))
     return list(products.values())
+
+
+def is_refusal(error):
+    """A 429 or 503 from the store: rate limiting, or overloaded. Asking
+    product by product then would only multiply the requests it's refusing."""
+    return getattr(getattr(error, "response", None), "status_code", None) in (429, 503)
 
 
 def _variants(product):
@@ -847,7 +899,7 @@ def is_coming_soon(product):
 def _parse_ts(value):
     """Parse an ISO timestamp or date, returning an aware datetime or None.
 
-    Python 3.10's fromisoformat rejects a trailing Z, and CI covers 3.10.
+    The Z is replaced: Python 3.10's fromisoformat rejected it.
     A bare date ("2026-10-01") is that calendar day wherever you are, so it
     becomes noon UTC: any time zone's local date is then the same day.
     """

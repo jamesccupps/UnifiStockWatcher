@@ -100,6 +100,24 @@ def test_prices_parse_into_formatted_strings(catalog):
     assert any(p.startswith("$") for p in priced), f"unexpected format: {priced[:5]}"
 
 
+def test_an_unchanged_category_page_answers_not_modified(build_id):
+    """The app asks for each category page with the ETag of its last copy. A
+    store that stopped answering 304 would cost nothing in correctness, but
+    every check would download the whole catalog again (~430 KB)."""
+    url = unifi_core._data_url(
+        build_id, f"/{unifi_core.STORE_REGIONS[REGION]['path']}/{unifi_core.CATEGORIES[0]}")
+    session = unifi_core.get_session()
+    first = session.get(url, timeout=15, allow_redirects=False)
+    assert first.status_code == 200, f"{unifi_core.CATEGORIES[0]}: {first.status_code}"
+    etag = first.headers.get("ETag")
+    assert etag, "category pages no longer carry an ETag"
+    time.sleep(SAMPLE_DELAY)
+    again = session.get(url, timeout=15, allow_redirects=False,
+                        headers={"If-None-Match": etag})
+    assert again.status_code == 304, \
+        f"an unchanged page answered {again.status_code}, not 304 Not Modified"
+
+
 def test_categories_all_still_resolve(build_id):
     for cat in unifi_core.CATEGORIES:
         found = unifi_core._fetch_category(build_id, REGION, cat)

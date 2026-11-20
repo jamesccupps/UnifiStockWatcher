@@ -25,7 +25,7 @@ if not ensure_requests(auto_install=not getattr(sys, "frozen", False)):
 from unifi_core import (
     __version__, APP_NAME, BASE_DIR, STORE_REGIONS,
     ProductNotFound, StoreError,
-    load_settings, get_build_id, fetch_all_products,
+    load_settings, get_build_id, fetch_all_products, is_refusal,
     refresh_category_coverage, product_url, is_portable,
     is_available, get_price, price_amount, product_title, check_slug,
     load_watched, save_watched, stock_history,
@@ -230,40 +230,129 @@ def main():
     print("=" * 60)
     print()
 
-    # Already alerted if the history last saw it in stock, so a restart
-    # doesn't alert again for everything that's in stock (see the app's
-    # _seed_notified); one that came back meanwhile still alerts.
-    notified = {w["slug"]: stock_history.last_state(w["slug"]) is True for w in watched}
-    delisted = {}             # slug -> when its own page last said it's gone
-    failures = 0
-    phone = webhooks.Sender()
+    watcher = Watcher(settings, watched)
+    try:
+        while True:
+            time.sleep(watcher.cycle())
+    finally:
+        # Stopped (Ctrl+C): an alert raised a moment ago gets a few seconds
+        # to go out, as when the app quits.
+        if not watcher.phone.wait(PHONE_QUIT_WAIT):
+            print("          WARNING  stopped with phone alerts still unsent")
 
-    def phone_result(where, reason):
+
+class Watcher:
+    """The watch loop's state. cycle() is one check of the store and returns
+    how long to wait before the next; the app's _cycle does the same work."""
+
+    def __init__(self, settings, watched, phone=None):
+        self.settings = settings
+        self.region = settings.get("region", "us")
+        self.interval = settings.get("poll_interval", 60)
+        self.watched = watched
+        # Already alerted if the history last saw it in stock, so a restart
+        # doesn't alert again for everything that's in stock (see the app's
+        # _seed_notified); one that came back meanwhile still alerts.
+        self.notified = {w["slug"]: stock_history.last_state(w["slug"]) is True
+                         for w in watched}
+        self.delisted = {}      # slug -> when its own page last said it's gone
+        self.failures = 0
+        self.partial = None     # the categories the last check couldn't read
+        self.phone = phone if phone is not None else webhooks.Sender()
+
+    def phone_result(self, where, reason):
         if reason:
             print(f"          WARNING  phone alert to {where} not sent: {reason}")
         else:
             print(f"          >>> Sent to {where}")
 
-    def check(item):
+    def _backoff(self):
+        """Out or refusing: wait longer each time, up to half an hour."""
+        self.failures += 1
+        return min(self.interval * 2 ** min(self.failures, 5),
+                   max(self.interval, MAX_BACKOFF))
+
+    def cycle(self):
+        now = datetime.now().strftime("%H:%M:%S")
+        failed = {}                 # category -> its error
+        try:
+            build_id = get_build_id(self.region)
+            for cat in refresh_category_coverage(build_id, self.region):
+                print(f"          Store added a category - now watching {cat}")
+            # One catalog fetch per cycle covers every watched item. Asking
+            # per item cost one request each - unthrottled, and growing with
+            # the watch list - for data the catalog already carries.
+            catalog = {p["slug"]: p for p in fetch_all_products(
+                           build_id, self.region,
+                           error_cb=lambda cat, e: failed.__setitem__(cat, e))
+                       if p.get("slug")}
+        except Exception as e:
+            wait = self._backoff()
+            print(f"[{now}]  WARNING: could not reach the store: {e} "
+                  f"(trying again in {wait}s)")
+            return wait
+
+        print(f"[{now}]  Checking…")
+        # Rate-limited or overloaded (429/503 on a category): the products it
+        # didn't send aren't asked for one by one, and the next check waits
+        # longer, as when the store is out. Until 3.2.6 every watched product
+        # missing from the catalog was asked for with full retries, each check.
+        refusing = any(is_refusal(e) for e in failed.values())
+        names = ", ".join(sorted(failed)) or None
+        if names and names != self.partial:
+            print(f"          WARNING  couldn't read {len(failed)} of the store's "
+                  f"categories ({names}); checked the rest")
+        self.partial = names
+
+        for item in self.watched:
+            # One product in an odd shape (or any other surprise) is
+            # reported and skipped: it used to end the watcher.
+            try:
+                self.check(item, catalog, build_id, incomplete=bool(failed),
+                           refusing=refusing)
+            except Exception as e:
+                print(f"          WARNING  {item['title']}: couldn't check it ({e})")
+
+        try:
+            stock_history.flush()
+        except OSError as e:
+            print(f"          WARNING  couldn't save the history: {e}")
+        if refusing:
+            wait = self._backoff()
+            print(f"          WARNING  the store is refusing requests: next check in {wait}s\n")
+            return wait
+        self.failures = 0
+        print(f"          Next check in {self.interval}s\n")
+        return self.interval
+
+    def check(self, item, catalog, build_id, incomplete=False, refusing=False):
+        settings, region = self.settings, self.region
         slug, title = item["slug"], item["title"]
         product = catalog.get(slug)
-        if product is None and time.monotonic() - delisted.get(slug, -DELISTED_RECHECK) \
-                < DELISTED_RECHECK:
-            return
+        if product is None:
+            if refusing:
+                return
+            if time.monotonic() - self.delisted.get(slug, -DELISTED_RECHECK) \
+                    < DELISTED_RECHECK:
+                return
         try:
             if product is not None:
                 in_stock, price = is_available(product), get_price(product)
             else:
-                in_stock, price = check_slug(build_id, slug, region)
+                # Not in the catalog: delisted, or a product the category
+                # pages don't carry. Asked once if the catalog was incomplete.
+                in_stock, price = check_slug(
+                    build_id, slug, region,
+                    retries=1 if incomplete else settings.get("max_retries", 3))
         except ProductNotFound:
-            if slug not in delisted:
+            if slug not in self.delisted:
                 print(f"          {'DELISTED':<16}  {title} — no longer on the store")
-            delisted[slug] = time.monotonic()
+            self.delisted[slug] = time.monotonic()
             return
         except StoreError as e:
             print(f"          WARNING  {title}: {e}")
             return
-        if delisted.pop(slug, None) is not None:
+        if self.delisted.pop(slug, None) is not None:
             print(f"          {'BACK':<16}  {title} is on the store again")
 
         price_str = f" ({price})" if price else ""
@@ -271,13 +360,13 @@ def main():
         label = "IN STOCK" if in_stock else "out of stock"
         print(f"          {label:<16}  {title}{price_str}")
         if event and event.get("price_was"):
-            price_changed(settings, phone, phone_result, item, event["price_was"], price,
-                          region)
+            price_changed(settings, self.phone, self.phone_result, item,
+                          event["price_was"], price, region)
 
-        if in_stock and not notified.get(slug) and not wants_alert(settings, item):
-            notified[slug] = True
+        if in_stock and not self.notified.get(slug) and not wants_alert(settings, item):
+            self.notified[slug] = True
             print(f"          (no alert: {'muted' if item.get('muted') else 'favorites only'})")
-        elif in_stock and not notified.get(slug):
+        elif in_stock and not self.notified.get(slug):
             notify_windows(
                 f"IN STOCK: {title}",
                 f"{title} is now available on the Unifi store!"
@@ -285,59 +374,16 @@ def main():
             if settings.get("sound_alerts", True):
                 play_sound()
             if settings.get("phone_alerts") and wants_alert(settings, item, phone=True):
-                phone.submit(settings, webhooks.in_stock_alert(
+                self.phone.submit(settings, webhooks.in_stock_alert(
                     title, slug, region, price, item.get("favourite", False)),
-                    on_result=phone_result)
+                    on_result=self.phone_result)
             if settings.get("auto_open_url", True):
                 webbrowser.open(product_url(slug, region))
             stock_history.record_alert()
-            notified[slug] = True
+            self.notified[slug] = True
             print("          >>> Notification sent!")
         elif not in_stock:
-            notified[slug] = False
-
-    try:
-        while True:
-            now = datetime.now().strftime("%H:%M:%S")
-            try:
-                build_id = get_build_id(region)
-                for cat in refresh_category_coverage(build_id, region):
-                    print(f"          Store added a category - now watching {cat}")
-                # One catalog fetch per cycle covers every watched item. Asking
-                # per item cost one request each - unthrottled, and growing with
-                # the watch list - for data the catalog already carries.
-                catalog = {p["slug"]: p for p in fetch_all_products(build_id, region)
-                           if p.get("slug")}
-            except Exception as e:
-                # Out or refusing: wait longer each time, up to half an hour.
-                failures += 1
-                wait = min(interval * 2 ** min(failures, 5), max(interval, MAX_BACKOFF))
-                print(f"[{now}]  WARNING: could not reach the store: {e} "
-                      f"(trying again in {wait}s)")
-                time.sleep(wait)
-                continue
-            failures = 0
-
-            print(f"[{now}]  Checking…")
-            for item in watched:
-                # One product in an odd shape (or any other surprise) is
-                # reported and skipped: it used to end the watcher.
-                try:
-                    check(item)
-                except Exception as e:
-                    print(f"          WARNING  {item['title']}: couldn't check it ({e})")
-
-            try:
-                stock_history.flush()
-            except OSError as e:
-                print(f"          WARNING  couldn't save the history: {e}")
-            print(f"          Next check in {interval}s\n")
-            time.sleep(interval)
-    finally:
-        # Stopped (Ctrl+C): an alert raised a moment ago gets a few seconds
-        # to go out, as when the app quits.
-        if not phone.wait(PHONE_QUIT_WAIT):
-            print("          WARNING  stopped with phone alerts still unsent")
+            self.notified[slug] = False
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

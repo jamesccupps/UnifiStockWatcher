@@ -38,7 +38,7 @@ from unifi_core import (  # noqa: E402
     STORE_REGIONS, CATEGORY_LABELS,
     ProductNotFound, StoreError,
     load_settings, save_settings, product_url, store_home,
-    get_build_id, invalidate_build_id, fetch_all_products,
+    get_build_id, invalidate_build_id, fetch_all_products, is_refusal,
     refresh_category_coverage, effective_categories,
     is_available, get_price, price_amount, price_value, product_title, check_slug,
     describe_restock, describe_sold_out_for, is_coming_soon,
@@ -2088,8 +2088,7 @@ class UnifiWatcherApp(tk.Tk):
             return True
         # Rate-limited or overloaded: asking product by product would only
         # multiply the requests it is refusing.
-        refusing = any(getattr(getattr(e, "response", None), "status_code", None) in (429, 503)
-                       for e in failed.values())
+        refusing = any(is_refusal(e) for e in failed.values())
         if refusing:
             self._store_trouble(f"it's refusing requests ({len(failed)} of its categories)")
         else:

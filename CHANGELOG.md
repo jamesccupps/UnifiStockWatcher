@@ -2,6 +2,35 @@
 
 Each release's own notes (what users see on the release page) are in `release-notes/`.
 
+## Unreleased
+
+### Changed
+
+- **A category page that hasn't changed isn't downloaded again.** Each check downloaded all 8 category pages,
+  about 430 KB (3.7 MB of JSON): some 600 MB a day at the default minute, 2.5 GB at 15 seconds. The store gives
+  each page an ETag and answers a request carrying it with `304 Not Modified` and no body, so the app keeps each
+  page's ETag and body (`_kept_page`) and re-reads the kept copy on a 304. Each page is still downloaded whole at
+  least every 10 minutes (`PAGE_REFRESH`), and a kept page answers only for the build it came from. The nightly
+  store check now checks that the store still answers 304.
+
+### Fixed
+
+- **The command-line watcher kept asking a store that was refusing requests.** When the store answered some of
+  its category pages with 429 or 503, the app stopped there and checked less often, but the command-line watcher
+  asked for every watched product missing from the catalog by its own page, with full retries, every check, and
+  reset its wait. It now does what the app does (`is_refusal`, shared): products the store didn't send wait for
+  the next check, and that check comes later. With categories missing for another reason, a missing product's
+  page is asked for once, not three times, and the categories it couldn't read are said once.
+
+### Development
+
+- The command-line watcher's loop is a `Watcher` class with a `cycle()` that returns the wait, and is tested
+  (alerting once, restarts, muting, a refusing or unreachable store, delisted products); the Install button's
+  code is tested (downloading, starting the update and quitting; a download or install that fails).
+- CI tests Python 3.11 to 3.15: 3.10 reached its end of life in October 2026, and 3.15 came out then. Running
+  from source needs 3.11 or newer.
+- A `_parse_ts` test asserted nothing (`assert got.year, got.month == ...`).
+
 ## v3.2.6
 
 Fixes from the 2026-11-15 code review: no new features.

@@ -7,7 +7,7 @@ your phone (webhooks), history, an installer and a portable zip, signed in-app u
 watcher.
 
 The repo is public on GitHub (`jamesccupps/UnifiStockWatcher`), with a page on GitHub Pages, a manifest in the
-user's Scoop bucket, a SourceForge mirror and (planned) a winget package. Keep personal paths, the user's own watch list and machine settings out
+user's Scoop bucket, a SourceForge mirror and a winget package (submitted, not yet merged). Keep personal paths, the user's own watch list and machine settings out
 of tracked files. Keep the README, `release-notes/`, CHANGELOG.md and this file current as work happens. Sibling
 projects with the same conventions: Slate (Rust) and Protect Panes (`UnifiCameraViewer`, Electron), whose
 release, update-signing and Pages setups this one follows.
@@ -57,7 +57,8 @@ to an empty folder is the safe way to run a build.
 - `unifi_watcher_gui.py`: the app. `UnifiWatcherApp` (window, tabs, watcher thread, alerts, updates, tray
   wiring), `WatchedRow` (a card), `BrowseDialog` (the catalog), `HistoryTab`, `SettingsTab`, `main()` (arguments,
   single instance, `--self-test`, `--finish-update`).
-- `unifi_watcher.py`: the CLI watcher.
+- `unifi_watcher.py`: the CLI watcher. `run_setup` (first run's picker), `Watcher` (the loop's state; `cycle()`
+  is one check and returns the wait), `main()` sleeps what each cycle returns.
 - `theme.py`: palettes, fonts, scale, the generated element images and every ttk style. `gfx.py`: signed-distance
   drawing, PNG/ICO encoding, `expand9`, the app icon.
 - `tray.py`: Shell_NotifyIconW on its own thread. `winplatform.py`: DPI, title bar colours, theme/accent from the
@@ -93,6 +94,13 @@ to an empty folder is the safe way to run a build.
   reads a store product takes its name from `product_title()` (the slug when the title is missing or null) and
   sorts by `price_value()` (numbers only); a product page with no object where `pageProps` or a product should
   be reads as "not on its page", answered at once: an `AttributeError` there was retried like a network failure.
+- **Category pages are conditional requests.** The store gives each `_next/data` category page an ETag (Next.js's
+  hash of the body) and answers `If-None-Match` with `304` and no body. `_fetch_category` keeps each page's ETag
+  and body by path (`_pages`: build id, ETag, body, time; the body, a few MB in all, not the parsed products,
+  tens of MB) and re-parses the kept body on a 304, so every check still gets products of its own. A kept page
+  answers only for its build and for `PAGE_REFRESH` (10 minutes), then is downloaded whole. A whole check was
+  ~430 KB on the wire (3.7 MB of JSON), ~600 MB a day at the default minute (measured 2026-11-20). Only the final
+  path after redirects is kept; tests clear it per test (`forget_pages`, conftest). `tests_live` checks the 304.
 - **Threads and Tk.** Workers (watcher, quick check, catalog fetch, update) never call Tk. `_post()` puts work on
   a queue that `_drain()` runs every 40 ms on the main thread. A Tk call from another thread blocks until the
   main loop polls (every 20 ms in `_tkinter`): a cycle that posted with `after()` per row spent seconds queueing,
@@ -114,9 +122,11 @@ to an empty folder is the safe way to run a build.
   everything in stock there).
 - **The cycle** (`_cycle`): `fetch_all_products` raises `StoreError` when no category answers (an empty catalog
   read as "no products"); failed categories come back through `error_cb`. Not reaching the store, or a 429/503
-  on a category, is `_store_trouble`: said once, "Can't reach the store" in the header, and `_watch_loop` backs off
-  (interval × 2^failures, up to `MAX_BACKOFF`); a refusing store is never asked product by product. With
-  categories missing, the baseline is merged, not replaced. Products are parsed defensively (`_variants`,
+  on a category (`is_refusal`), is `_store_trouble`: said once, "Can't reach the store" in the header, and
+  `_watch_loop` backs off (interval × 2^failures, up to `MAX_BACKOFF`); a refusing store is never asked product by
+  product. With categories missing, the baseline is merged, not replaced. The CLI's `Watcher.cycle()` does the
+  same and returns the wait; until it shared `is_refusal` (after 3.2.6) it asked a refusing store for every
+  missing product, every check. Products are parsed defensively (`_variants`,
   `_objects`, numeric `amount` only) and each in its own try. `_store_gen` is bumped on a store change: a
   cycle or quick check that sees it change drops its results. Stop ends a watch-loop cycle at the next product;
   Start while it finishes waits for it (`_start_when_idle`). `_delisted` is slug → time: the catalog is looked
@@ -268,6 +278,9 @@ itself from each release, every 4 hours, so a release needs no Scoop work as lon
   replace a file on a release that's out: Scoop and winget have recorded its hash. Fix it with a new version.
 - If a file name or the zip's layout must change, change `bucket/unifistockwatcher.json` in
   `jamesccupps/scoop-bucket` in the same change.
+- winget's manifest relies on the installer: the Inno `AppId` `{5B1E0F7A-3C2D-4E8B-9A61-7D2C4F0B8E35}` (its
+  ProductCode is that + `_is1`), the per-user install (`PrivilegesRequired=lowest`, its `Scope: user`) and the name
+  `UnifiStockWatcher-Setup.exe`. Changing any of them strands winget installs from earlier versions.
 
 **The signing key** (Ed25519):
 - Private key: `%USERPROFILE%\.unifi-stock-watcher\update-signing-key.pem` on the development PC, and the same
@@ -290,7 +303,10 @@ Workflow actions are pinned to commits (version in a comment); Dependabot propos
 pins for `requirements-dev.txt` and `requirements-sign.txt` (hashes included; keep its `cryptography` at
 `requirements-dev.txt`'s). Inno Setup is pinned by hand in `scripts/install_inno.ps1` (version and SHA-256 from
 jrsoftware/issrc's release). Checkouts keep no token (`persist-credentials: false`); only the release's publish
-job can write. Security reports: SECURITY.md (GitHub's private reporting).
+job can write. Security reports: SECURITY.md (GitHub's private reporting). Dependabot alerts are on (an account
+setting, 2026-11-18; the repository's Security tab, owner only); its automatic security-update PRs aren't.
+`requirements.txt` is a range (`requests>=2.31,<3`), so alerts don't see what a build bundles beneath it (urllib3,
+idna, certifi, charset-normalizer): check those against the advisory database by hand when it matters.
 
 ## Pages, SourceForge, winget, Scoop
 
@@ -320,7 +336,9 @@ job can write. Security reports: SECURITY.md (GitHub's private reporting).
   the user signed in); a stale fork master is fine, the PR is only the new folder. The body follows the repo's
   PR template. The CLA bot asks on every PR (labels it `Needs-CLA`) even though the user has signed: the user
 answers `@microsoft-github-policy-service agree` there. Validation takes about 45 minutes, then a moderator
-approves. First submission: 3.2.0, #470772.
+approves. First submission: 3.2.0, #470772 (validated 2026-11-04, still waiting for a moderator on 2026-11-18).
+  Leave an open PR as it is rather than moving it to a newer version; once it's merged, submit the current version
+  as its own PR.
 - **Scoop**: the user's bucket `jamesccupps/scoop-bucket` (`scoop bucket add jamesccupps
   https://github.com/jamesccupps/scoop-bucket`, `scoop install jamesccupps/unifistockwatcher`), in the README's
   Install and on the page's hero. It installs the zip without `portable.txt` (install kind `folder`: data in
