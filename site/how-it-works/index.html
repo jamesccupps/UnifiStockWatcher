@@ -1,0 +1,281 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>How UniFi Stock Watcher works: checks, alerts, updates</title>
+<meta name="description" content="How UniFi Stock Watcher reads the Ubiquiti Store without hammering it, how its restock and price alerts reach your PC and phone, and how updates are signed.">
+<meta name="theme-color" content="#123150">
+<link rel="canonical" href="https://jamesccupps.github.io/UnifiStockWatcher/how-it-works/">
+<meta property="og:type" content="article">
+<meta property="og:site_name" content="James Cupps">
+<meta property="og:title" content="How UniFi Stock Watcher works">
+<meta property="og:description" content="What each check reads from the Ubiquiti Store, how often, how it goes easy on the store, how alerts reach your PC and phone, and how signed in-app updates work.">
+<meta property="og:url" content="https://jamesccupps.github.io/UnifiStockWatcher/how-it-works/">
+<meta property="og:image" content="https://jamesccupps.github.io/UnifiStockWatcher/images/social-preview.png">
+<meta property="og:image:width" content="1280">
+<meta property="og:image:height" content="640">
+<meta property="og:image:alt" content="UniFi Stock Watcher: Ubiquiti Store restock alerts">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" type="image/png" href="../images/icon.png">
+<link rel="apple-touch-icon" href="../images/icon.png">
+<meta name="color-scheme" content="light dark">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "BreadcrumbList",
+  "itemListElement": [
+    { "@type": "ListItem", "position": 1, "name": "James Cupps", "item": "https://jamesccupps.github.io/" },
+    { "@type": "ListItem", "position": 2, "name": "UniFi Stock Watcher", "item": "https://jamesccupps.github.io/UnifiStockWatcher/" },
+    { "@type": "ListItem", "position": 3, "name": "How it works", "item": "https://jamesccupps.github.io/UnifiStockWatcher/how-it-works/" }
+  ]
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "TechArticle",
+  "headline": "How UniFi Stock Watcher works",
+  "description": "What each check reads from the Ubiquiti Store, how often, how it goes easy on the store, how alerts reach your PC and phone, and how signed in-app updates work.",
+  "url": "https://jamesccupps.github.io/UnifiStockWatcher/how-it-works/",
+  "image": "https://jamesccupps.github.io/UnifiStockWatcher/images/social-preview.png",
+  "dateModified": "2026-11-23",
+  "about": { "@type": "SoftwareApplication", "name": "UniFi Stock Watcher", "url": "https://jamesccupps.github.io/UnifiStockWatcher/" },
+  "author": { "@type": "Person", "name": "James Cupps", "jobTitle": "Facilities Director", "url": "https://jamesccupps.github.io/" }
+}
+</script>
+<style>
+  :root {
+    --bg: #f6f8fa; --panel: #ffffff; --text: #1b2129; --muted: #59636f; --line: #dfe4ea;
+    --accent: #0b63b6; --code: #eef1f5; --hero: linear-gradient(160deg, #123150 0%, #0e141b 100%);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #111417; --panel: #1a1e23; --text: #e6e9ee; --muted: #9aa4b1; --line: #2a3038; --accent: #5aaaf7; --code: #22272e; }
+  }
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.55 "Segoe UI", system-ui, -apple-system, Ubuntu, "DejaVu Sans", sans-serif; }
+  a { color: var(--accent); }
+  code { background: var(--code); border-radius: 4px; padding: 1px 5px; font: 14px Consolas, "DejaVu Sans Mono", monospace; overflow-wrap: anywhere; }
+  .wrap { max-width: 1080px; margin: 0 auto; padding: 0 20px; }
+  header.hero { background: var(--hero); color: #fff; padding: 28px 0 40px; }
+  .crumbs { font-size: 14px; color: #a9c3dd; margin: 0 0 22px; }
+  .crumbs a { color: #d8e8f7; }
+  .crumbs span[aria-hidden] { margin: 0 6px; }
+  .brand { display: flex; align-items: center; gap: 16px; }
+  .brand img { width: 56px; height: 56px; }
+  .brand h1 { margin: 0; font-size: 38px; font-weight: 600; letter-spacing: -0.5px; line-height: 1.1; }
+  .tagline { font-size: 20px; margin: 16px 0 22px; max-width: 760px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+  .btn { display: inline-flex; align-items: center; gap: 10px; padding: 12px 22px; border-radius: 8px; font-weight: 600;
+         text-decoration: none; background: #fff; color: #123150; font-size: 17px; }
+  .btn:hover { background: #e6f0fa; }
+  .btn.ghost { background: transparent; color: #fff; border: 1px solid rgba(255,255,255,.45); font-weight: 500; font-size: 15px; padding: 10px 16px; }
+  .btn.ghost:hover { background: rgba(255,255,255,.1); }
+  .btn small { font-weight: 400; opacity: .75; font-size: 13px; }
+  section { padding: 44px 0 8px; }
+  h2 { font-size: 26px; margin: 0 0 18px; }
+  h3 { font-size: 19px; margin: 26px 0 8px; }
+  .prose { max-width: 760px; }
+  .prose p, .prose li { color: var(--text); }
+  .prose ul, .prose ol { padding-left: 22px; }
+  .prose li + li { margin-top: 8px; }
+  .toc { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 20px; margin-top: 36px; max-width: 760px; }
+  .toc h2 { font-size: 17px; margin: 0 0 8px; }
+  .toc ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 32px; }
+  .toc li { break-inside: avoid; margin: 2px 0; }
+  .shot { margin: 24px 0 8px; max-width: 900px; }
+  .shot img { width: 100%; height: auto; border-radius: 8px; border: 1px solid var(--line); display: block; }
+  .shot figcaption { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .shot.narrow { max-width: 620px; }
+  .note { color: var(--muted); font-size: 14px; margin: 14px 0 0; }
+  .back { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 18px 20px; max-width: 760px; }
+  .back p { margin: 0; }
+  .back p + p { margin-top: 8px; }
+  footer { color: var(--muted); font-size: 14px; padding: 40px 0 50px; border-top: 1px solid var(--line); margin-top: 44px; }
+  footer p { margin: 0 0 6px; }
+  @media (max-width: 600px) {
+    header.hero { padding: 22px 0 28px; }
+    .brand h1 { font-size: 30px; }
+    .brand img { width: 48px; height: 48px; }
+    .tagline { font-size: 18px; }
+    .toc ol { columns: 1; }
+  }
+
+  /* More tools from James Cupps */
+  .jc-more-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 12px; }
+  .jc-more-grid a { display: block; text-decoration: none; background: var(--panel, var(--card, transparent)); border: 1px solid var(--line, rgba(127,127,127,.3));
+                    border-radius: 10px; padding: 14px 16px; color: var(--text, inherit); }
+  .jc-more-grid a:hover { border-color: var(--accent, currentColor); }
+  .jc-more-grid b { display: block; color: var(--accent, inherit); }
+  .jc-more-grid span { color: var(--muted, inherit); font-size: 14px; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="wrap">
+    <nav class="crumbs" aria-label="Breadcrumb"><a href="https://jamesccupps.github.io/">James Cupps</a><span aria-hidden="true">›</span><a href="../">UniFi Stock Watcher</a><span aria-hidden="true">›</span><span aria-current="page">How it works</span></nav>
+    <div class="brand"><img width="56" height="56" src="../images/icon.png" alt=""><h1>How UniFi Stock Watcher works</h1></div>
+    <p class="tagline">What the app reads from the Ubiquiti Store and how often, how it goes easy on the store, how its alerts reach you, and how it updates itself safely.</p>
+    <div class="actions">
+      <a class="btn" id="primary" href="https://github.com/jamesccupps/UnifiStockWatcher/releases/latest/download/UnifiStockWatcher-Setup.exe">Download for Windows <small id="primary-note">UnifiStockWatcher-Setup.exe</small></a>
+      <a class="btn ghost" href="../">Back to UniFi Stock Watcher</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+  <nav class="toc" aria-labelledby="toc-title">
+    <h2 id="toc-title">On this page</h2>
+    <ol>
+      <li><a href="#checks">What each check reads</a></li>
+      <li><a href="#often">How often, and going easy on the store</a></li>
+      <li><a href="#alerts">How alerts work</a></li>
+      <li><a href="#per-product">Per-product alerts and price changes</a></li>
+      <li><a href="#watch-list">The watch list and history</a></li>
+      <li><a href="#updates">Signed in-app updates</a></li>
+      <li><a href="#privacy">What leaves your PC</a></li>
+    </ol>
+  </nav>
+
+  <section id="checks" class="prose">
+    <h2>What each check reads</h2>
+    <p>The Ubiquiti Store (store.ui.com) builds its pages from public data, the same data your browser loads when you open the store. UniFi Stock Watcher reads that data directly. It needs no login and no API key, and it doesn't scrape the pages you see.</p>
+    <p>A check reads the store's 8 category pages, which between them list the whole catalog: about 500 products. For each product's variants they give the stock status (available, sold out or coming soon), the price, and the store's own restock date when it has one. That's 8 requests a check, whether you watch one product or fifty.</p>
+    <p>Each check is compared with the one before. The first check after you click <strong>Start watching</strong> sets the baseline. After that, any product whose stock changes shows up in the <strong>Store changes</strong> feed, and a product on your watch list that comes back in stock alerts you.</p>
+    <p>A few products aren't on any category page, and Ubiquiti renames and moves products now and then. A watched product the category pages don't list is looked up on its own page. The store often answers that with a redirect, which the app follows. It then matches the product by its current address, its former addresses or its product ID. When none of those match, the app marks the product <em>delisted</em> rather than guess.</p>
+    <p>Categories get renamed too. Category requests follow the store's redirects, and once a day the app looks for new categories carrying products its list misses. Every night, an automated check runs against the real store on GitHub, so a change in the store's data is caught the day it happens.</p>
+  </section>
+
+  <section id="often" class="prose">
+    <h2>How often, and going easy on the store</h2>
+    <p>The app checks every minute by default. <strong>Settings → Watching</strong> sets anything from every 15 seconds to once an hour, and <strong>Check now</strong> (F5) checks at once.</p>
+    <ul>
+      <li><strong>Only what changed is downloaded.</strong> The store labels each category page with a fingerprint (an ETag). The app sends back the fingerprint of the copy it already has, and when nothing has changed the store answers <em>not modified</em> with no data. A check with no changes is a few kilobytes instead of about 430 KB. Each page is still downloaded in full at least every 10 minutes.</li>
+      <li><strong>A few requests at a time.</strong> The 8 requests go out at most 4 at once, over connections the app keeps open between checks.</li>
+      <li><strong>The store's home page is read every 5 minutes, not every check.</strong> It gives the current version of the site, which the data addresses depend on.</li>
+      <li><strong>It backs off when the store is in trouble.</strong> When the store doesn't answer, or turns requests away because it's busy or rate limiting, the app says so once and waits longer. Each failed check doubles the wait, up to half an hour, until the store answers again. While the store is turning requests away, the app never falls back to asking for each product's page.</li>
+      <li><strong>A delisted product's page is asked again every 6 hours</strong>, not on every check.</li>
+    </ul>
+    <p>The command-line watcher, <code>UnifiStockWatcher-cli.exe</code>, works the same way.</p>
+  </section>
+
+  <section id="alerts" class="prose">
+    <h2>How alerts work</h2>
+    <p>When a product you watch comes back in stock, the app:</p>
+    <ul>
+      <li>shows a <strong>Windows notification</strong>, which opens the product's page when you click it</li>
+      <li>plays a <strong>sound</strong></li>
+      <li>opens the product's page in your <strong>browser</strong></li>
+    </ul>
+    <p>You can switch each of these off in <strong>Settings → Alerts</strong>. Either way, the product's card turns green with an <strong>Open in store</strong> button, and the icon in the notification area gets a green dot.</p>
+    <p>Each return to stock alerts once. A product that's already in stock when the app starts doesn't alert again, but one that came back while the app was closed does. Alerts that arrive within a few seconds of each other share one notification, which opens the app's window.</p>
+    <h3>On your phone</h3>
+    <p><strong>Settings → Alerts on your phone</strong> sends every alert to your phone too, through the service you choose:</p>
+    <ul>
+      <li><strong>ntfy</strong>: free, no account. Subscribe to a topic in the ntfy app, or use a server of your own.</li>
+      <li><strong>Pushover</strong>: your user key and an application token.</li>
+      <li><strong>Discord</strong>: a channel's webhook. The Discord app notifies you of the message.</li>
+      <li><strong>Slack</strong>: an incoming webhook for a channel.</li>
+      <li><strong>Any address</strong>: the alert as JSON, for Home Assistant, n8n, Zapier, IFTTT or a server of your own.</li>
+    </ul>
+    <p>Your PC sends the alert when it finds the product, so it has to be on and watching. A service that's busy or can't be reached is tried twice more over about 25 seconds. <strong>Send a test</strong> shows what the service answered. The address or key stays in the settings file on your PC, and the app's log only ever names the service, never the address.</p>
+    <figure class="shot narrow">
+      <img src="../images/settings-dark.png" width="820" height="790" alt="The Settings tab: how often to check, the store, the alert switches and Start with Windows" loading="lazy">
+      <figcaption>Settings: how often to check, the store and the alerts. Changes take effect at once.</figcaption>
+    </figure>
+  </section>
+
+  <section id="per-product" class="prose">
+    <h2>Per-product alerts and price changes</h2>
+    <ul>
+      <li><strong>Favorites.</strong> The ★ on a card pins the product to the top of your list. <strong>Settings → Alerts → Only for favorites</strong> alerts only for starred products, and the others are still checked and recorded. Your phone has its own <strong>Only for favorites</strong>, so the others can still alert on the PC.</li>
+      <li><strong>Mute.</strong> The bell on a card silences one product. A muted product is still checked and kept in the history. Unmuting a product that's in stock waits for its next return to stock rather than alerting straight away.</li>
+      <li><strong>Price drops.</strong> <strong>Settings → Alerts → Tell me when a price drops</strong> alerts you, and your phone if that's on, when a product you watch gets cheaper.</li>
+      <li><strong>Every price change is recorded.</strong> The history keeps each price change of a watched product, alert or not. Each price is compared with the last one recorded, so a change that happened while the app was closed counts too. A product the store hasn't priced yet doesn't count as a change, and neither does switching to a store with another currency.</li>
+      <li><strong>Changing store</strong> (United States, Europe, United Kingdom or Canada) starts a new baseline. A product that's already in stock in the new store doesn't alert, but its next return does.</li>
+    </ul>
+  </section>
+
+  <section id="watch-list" class="prose">
+    <h2>The watch list and history</h2>
+    <p><strong>Add products…</strong> opens the store's live catalog. Search it, filter it by category, and tick the products you want. It lists sold-out products, with how long each has been out. Tick <strong>Include products in stock</strong> to see everything.</p>
+    <figure class="shot">
+      <img src="../images/add-products-dark.png" width="900" height="650" alt="The Add products dialog: the store's catalog with check boxes, category, price and stock status, sold-out products showing how long they've been out" loading="lazy">
+      <figcaption>Add products: the live catalog, with how long each sold-out product has been out.</figcaption>
+    </figure>
+    <p>Each card on your list shows the product's stock and price. For a sold-out product, it also shows the store's restock estimate and how long it's been out, like <code>back ~7 Nov · sold out 13 days</code>. <strong>⋯</strong> on a card has <em>Check now</em>, <em>Copy link</em>, <em>Mute alerts</em> and <em>Remove</em>, and double-clicking a card opens the product's page. <strong>Settings → Watch list</strong> exports your list and imports it again.</p>
+    <p>Below the list are two views. <strong>Store changes</strong> is a live feed of every product coming into or going out of stock anywhere in the store, and <strong>Activity</strong> shows what the watcher did.</p>
+    <p><strong>History</strong> records changes, not checks. It logs each time a watched product goes in or out of stock or changes price, and every stock change anywhere in the store. It keeps the latest 5,000 events, and drops store-wide ones first when it's full. You can search it, and <strong>Export CSV…</strong> saves what the list shows, as a file that opens in Excel with € and £ intact.</p>
+    <figure class="shot narrow">
+      <img src="../images/history-light.png" width="820" height="790" alt="The History tab: stock changes with times, products and prices" loading="lazy">
+      <figcaption>History: every change, for your products or the whole store.</figcaption>
+    </figure>
+    <p>All of it stays on your PC, in <code>%APPDATA%\UniFi Stock Watcher</code>, or beside the program for the portable copy.</p>
+    <p class="note">The pictures are from the app's demo mode: real product names with made-up stock, prices and dates.</p>
+  </section>
+
+  <section id="updates" class="prose">
+    <h2>Signed in-app updates</h2>
+    <p>Once a day, the app asks GitHub for the latest release's <code>latest.json</code>. It's a small manifest naming the version, and the size and SHA-256 hash of each download. You can turn the check off in <strong>Settings → Updates</strong>.</p>
+    <ol>
+      <li><strong>The manifest is signed</strong> with the project's Ed25519 key. The app checks the signature against the public key built into it, and ignores a manifest whose signature doesn't match.</li>
+      <li><strong>Only a newer version is offered.</strong> The app never goes back a version.</li>
+      <li><strong>Nothing is downloaded until you click Install.</strong> The download has to match the signed size and hash, or it's deleted.</li>
+      <li><strong>Then it installs.</strong> An installed copy runs the new installer silently, which waits for the app to close and then starts the new version. A portable copy unzips the new version to a temporary folder and swaps its program files in place, never the watch list beside them. If the swap fails, everything is put back and the old version starts again.</li>
+    </ol>
+    <p>Separately, the installer and both programs are code-signed by James Cupps, which is the publisher Windows names. Before a release is published, its exact files are installed, started, and updated to from the previous release on a fresh Windows machine on GitHub. Only the release's own signing step can use the signing key.</p>
+  </section>
+
+  <section id="privacy" class="prose">
+    <h2>What leaves your PC</h2>
+    <p>The app reads the store's public catalog, and asks GitHub once a day for updates. It sends nothing about you, your watch list or your PC anywhere. Alerts on your phone go only to the service you choose, with the product's name, price and link.</p>
+  </section>
+
+  <section>
+    <div class="back">
+      <p><a href="../">Back to UniFi Stock Watcher</a>: download it, see more screenshots, and install it with Scoop.</p>
+      <p>The source, the full README and every release are <a href="https://github.com/jamesccupps/UnifiStockWatcher">on GitHub</a>.</p>
+    </div>
+  </section>
+
+  <section aria-labelledby="jc-more">
+    <h2 id="jc-more">More tools from James Cupps</h2>
+    <div class="jc-more-grid">
+      <a href="https://jamesccupps.github.io/UnifiCameraViewer/"><b>Protect Panes</b><span>UniFi Protect live view, a window per camera</span></a>
+      <a href="https://jamesccupps.github.io/PingerPlot/"><b>PingerPlot</b><span>Continuous traceroute: where on the path it goes wrong</span></a>
+      <a href="https://jamesccupps.github.io/NetSentinel/"><b>NetSentinel</b><span>Network monitor and intrusion detection for Windows</span></a>
+      <a href="https://jamesccupps.github.io/Slate/"><b>Slate</b><span>A text editor for files of any size</span></a>
+      <a href="https://jamesccupps.github.io/"><b>Everything else</b><span>Every project, on one page</span></a>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap">
+    <p>UniFi Stock Watcher is free and open source under the MIT license, made by <a href="https://jamesccupps.github.io/">James Cupps</a>. <a href="https://github.com/jamesccupps/UnifiStockWatcher">github.com/jamesccupps/UnifiStockWatcher</a></p>
+    <p>An independent project, not made, endorsed or supported by Ubiquiti. UniFi is a trademark of Ubiquiti Inc.</p>
+  </div>
+</footer>
+
+<script>
+(function () {
+  // The big button is for a Windows PC. Elsewhere it says so, and a phone gets the release page to send to a PC.
+  var ua = navigator.userAgent || "";
+  var platform = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || "";
+  // (an iPad says it's a Mac, but has a touch screen)
+  var phone = /Android|iPhone|iPad|iPod/i.test(ua) || (navigator.userAgentData && navigator.userAgentData.mobile) ||
+    (/Mac/i.test(platform) && navigator.maxTouchPoints > 1);
+  var windows = /Win/i.test(platform + " " + ua) && !phone;
+  var primary = document.getElementById("primary"), note = document.getElementById("primary-note");
+  if (phone) {
+    primary.href = "https://github.com/jamesccupps/UnifiStockWatcher/releases/latest";
+    primary.firstChild.nodeValue = "Get it for your PC ";
+    note.textContent = "Windows 10 and 11";
+  } else if (!windows) {
+    note.textContent = "Windows 10 and 11 only";
+  }
+})();
+</script>
+</body>
+</html>

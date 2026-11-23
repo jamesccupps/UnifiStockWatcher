@@ -62,7 +62,7 @@ jobs:
         run: |
           code=$(curl -sS -o /dev/null -w '%{http_code}' -X POST https://api.indexnow.org/indexnow \
             -H 'Content-Type: application/json; charset=utf-8' \
-            -d "{\"host\":\"jamesccupps.github.io\",\"key\":\"$KEY\",\"keyLocation\":\"https://jamesccupps.github.io/$KEY.txt\",\"urlList\":[\"$PAGE\"]}") || true
+            -d "{\"host\":\"jamesccupps.github.io\",\"key\":\"$KEY\",\"keyLocation\":\"https://jamesccupps.github.io/$KEY.txt\",\"urlList\":[\"$PAGE\",\"${PAGE%/}/how-it-works/\"]}") || true
           case "$code" in
             200|202) echo "IndexNow accepted (HTTP $code)" ;;
             *) echo "::warning title=IndexNow::not submitted (HTTP $code)" ;;

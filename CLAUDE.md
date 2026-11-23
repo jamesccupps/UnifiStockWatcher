@@ -73,7 +73,7 @@ the safe way to run a build.
   service's settings lack), `build_request()` (each service's format), `send()` (retries), `Sender` (one thread,
   in order). The GUI and the CLI both use it.
 - `installer/UnifiStockWatcher.iss`, `UnifiStockWatcher.spec`, `scripts/`: building and releasing.
-- `site/index.html` (+ `site/images/`): the project page. `release-notes/vX.Y.Z.md`: each release's text.
+- `site/index.html` (+ `site/images/`): the project page; `site/how-it-works/index.html`, a page explaining it. `release-notes/vX.Y.Z.md`: each release's text.
 - Data (never in the repo): `%APPDATA%\UniFi Stock Watcher\` or beside a portable exe: `watched_items.json`,
   `settings.json`, `stock_history.json` (version 2), `category_cache.json`, `unifi-stock-watcher.log`,
   `update.log`.
@@ -329,7 +329,12 @@ idna, certifi, charset-normalizer): check those against the advisory database by
   a failed ping is only a warning). Every page of the user's keeps its search tags (title ≤ 60 characters,
   description ≤ 160, canonical URL, `og:site_name`, `og:image` alt and size, `theme-color`, width and height on
   images) and ends with the "More tools from James Cupps" section (`.jc-more-grid`) linking the sibling tools and
-  the hub: keep both when editing `site/index.html`.
+  the hub: keep both when editing `site/index.html`. The site describes James only as a facilities director, with
+  no employer, city or state (the hub's rule).
+- **`site/how-it-works/`** (2026-11-23) is the site's second page. It has the front page's template, a
+  BreadcrumbList, and images at `../images/`. It's also a test: Google had never crawled the front page, and this
+  shows whether it crawls a new URL on the site. Until that's settled, leave the front page as it is, apart from
+  its one link to this page. `pages.yml` sends both URLs to IndexNow.
 - **SourceForge** (`unifistockwatcher`) mirrors GitHub's release files, never the other way round:
   `packaging/sourceforge/README.md` has the setup, the listing text, categories, screenshot captions and the
   logo. Unlock the project menu (lock icon), gear next to **Files** → **GitHub Integration**, with
